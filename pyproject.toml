@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=77.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cropcounter"
+version = "0.1.0"
+description = "Crop emergence counting from proximal RGB — frozen DINOv3 ConvNeXt backbone, pyramid decoder, point heatmap."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "AGPL-3.0-only"
+authors = [
+    { name = "InsightML", email = "hello@insightml.io" },
+]
+keywords = [
+    "agriculture",
+    "computer-vision",
+    "crop-counting",
+    "dinov3",
+    "plant-phenotyping",
+    "point-detection",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+dependencies = [
+    "torch>=2.5",
+    "torchvision>=0.20",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.9",
+    "albumentations>=2",
+    "scipy>=1.11",
+    "matplotlib>=3.8",
+    "pillow>=10.0",
+    "tqdm>=4.66",
+    # Required to import facebookresearch/dinov3's hubconf, which torch.hub
+    # executes when the frozen backbone loads: hubconf pulls dinov3.hub.segmentors
+    # -> dinov3.eval.utils (torchmetrics) -> dinov3.logging (termcolor). Neither
+    # is used by this package directly, but the backbone will not load without them.
+    "torchmetrics>=1.0",
+    "termcolor>=2.0",
+]
+
+[project.optional-dependencies]
+# Extra annotation formats beyond the built-in CVAT 1.1 and COCO-keypoints loaders.
+formats = ["datumaro"]
+# Client for the hosted InsightML portal API.
+portal = ["requests>=2.31", "python-dotenv>=1.0"]
+# Local development. nbconvert + ipykernel are here so the notebooks in
+# notebooks/ can be run — and executed headlessly as a check — from a plain
+# `pip install -e ".[dev]"`, not merely stripped of outputs by nbstripout.
+dev = ["pytest>=8.0", "ruff>=0.6", "nbstripout>=0.6", "nbconvert>=7.0", "ipykernel>=6.0"]
+
+[project.urls]
+Homepage = "https://insightml.io"
+Repository = "https://github.com/InsightML/crop-counter"
+Issues = "https://github.com/InsightML/crop-counter/issues"
+Portal = "https://portal.insightml.io"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+# Notebooks are exploratory/worked-example material owned by the training/inference
+# pass, not held to this repo's source lint bar; keep ruff scoped to src/ + tests/.
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+# Pyflakes + essential pycodestyle only (ruff's classic default selection), pinned
+# explicitly so a future ruff version's broader default doesn't surprise CI.
+select = ["E4", "E7", "E9", "F"]

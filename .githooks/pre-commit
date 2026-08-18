@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Block committing a Jupyter notebook that still carries outputs / execution
+# counts. Activate once per clone with:
+#
+#   git config core.hooksPath .githooks
+#
+# Needs `nbstripout` on PATH (pip install nbstripout, or `pip install
+# cropcounter[dev]`). If it isn't installed, this hook warns and lets the
+# commit through rather than blocking everyone's workflow on a missing tool.
+set -euo pipefail
+
+notebooks=$(git diff --cached --name-only --diff-filter=ACM -- '*.ipynb' || true)
+if [ -z "$notebooks" ]; then
+    exit 0
+fi
+
+if ! command -v nbstripout >/dev/null 2>&1; then
+    echo "warning: nbstripout not found on PATH — skipping output-strip check for:" >&2
+    echo "$notebooks" >&2
+    echo "install with: pip install nbstripout" >&2
+    exit 0
+fi
+
+status=0
+while IFS= read -r nb; do
+    [ -z "$nb" ] && continue
+    # --verify (implies --dry-run) exits non-zero if stripping WOULD change
+    # the file, i.e. it currently carries outputs/execution counts.
+    if ! nbstripout --verify "$nb" >/dev/null 2>&1; then
+        echo "error: $nb has outputs/execution counts — strip before committing:" >&2
+        echo "  nbstripout $nb && git add $nb" >&2
+        status=1
+    fi
+done <<< "$notebooks"
+
+exit $status

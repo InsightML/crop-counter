@@ -1,0 +1,43 @@
+cropcounter
+Copyright (C) 2026 InsightML
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version. See LICENSE for the full text.
+
+## Third-party model: DINOv3
+
+This package's backbone is Meta's DINOv3 ConvNeXt (`facebookresearch/dinov3`,
+loaded via `torch.hub`). DINOv3 is governed by its own licence from Meta, not
+by AGPL-3.0 — see https://github.com/facebookresearch/dinov3 for its terms.
+
+The backbone checkpoint (`dinov3_convnext_{small,base,large}_pretrain_lvd1689m*.pth`)
+is a **gated download from Meta**. It is not distributed in this repository,
+is never fetched automatically by any code here, and must be downloaded
+directly from Meta by whoever runs this package — see `cropcounter.weights`
+or the README's install section for the exact steps.
+
+The decoder checkpoint that this repository or its releases may ship under
+`weights/` is InsightML's own trained head. It contains no Meta tensors or
+weights, was trained from scratch on top of the frozen (and separately
+downloaded) DINOv3 backbone, and is provided under AGPL-3.0 like the rest of
+this repository.
+
+Anyone deploying this package together with the DINOv3 backbone is
+responsible for complying with **both** licences in that deployment: AGPL-3.0
+for `cropcounter` and its decoder weights, and Meta's DINOv3 licence for the
+backbone.
+
+In short: our trained weights are in the repo; the base model comes from
+Meta under their own licence.
+
+## Other third-party dependencies
+
+This package depends on open-source libraries (PyTorch, torchvision,
+albumentations, OpenCV, NumPy, SciPy, Matplotlib, Pillow, tqdm, torchmetrics,
+termcolor, and — for optional extras — Datumaro, requests, python-dotenv).
+Each is used under its own licence as published by its respective project;
+see `pyproject.toml` for the dependency list and each project's own
+repository for its licence text. None of their licence terms are reproduced
+here.

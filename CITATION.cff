@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "cropcounter"
+version: 0.1.0
+date-released: "2026-08-19"
+abstract: >-
+  Crop emergence counting from proximal RGB imagery: a frozen DINOv3
+  ConvNeXt backbone, a pyramid decoder, and a stride-4 point heatmap decoded
+  to per-plant coordinates and a count.
+authors:
+  - name: "InsightML"
+    website: "https://insightml.io"
+  - given-names: "Freddie"
+    family-names: "Allen-Stevens"
+    affiliation: "InsightML"
+    alias: "FerDDei"
+  - given-names: "Liam"
+    family-names: "Cracknell"
+    affiliation: "InsightML"
+repository-code: "https://github.com/InsightML/crop-counter"
+url: "https://insightml.io"
+license: AGPL-3.0-only
+keywords:
+  - agriculture
+  - computer-vision
+  - crop-counting
+  - dinov3
+  - plant-phenotyping
+  - point-detection

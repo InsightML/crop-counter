@@ -1,0 +1,50 @@
+# Exact environment Crop Counter was verified in (conda create -n crop-counter python=3.12,
+# macOS 26.1 arm64 / Apple Silicon, Python 3.12.13). Regenerate with:
+#   conda run -n crop-counter pip freeze | grep -v '^-e '
+# The package itself is installed separately and on purpose:
+#   pip install -e ".[portal]"
+
+albucore==0.0.24
+albumentations==2.0.8
+annotated-types==0.8.0
+certifi==2026.7.22
+charset-normalizer==3.5.1
+contourpy==1.3.3
+cycler==0.12.1
+filelock==3.32.3
+fonttools==4.63.0
+fsspec==2026.7.0
+idna==3.19
+Jinja2==3.1.6
+kiwisolver==1.5.0
+lightning-utilities==0.15.3
+MarkupSafe==3.0.3
+matplotlib==3.11.1
+mpmath==1.3.0
+networkx==3.6.1
+numpy==2.5.2
+opencv-python-headless==5.0.0.93
+packaging==26.2
+pillow==12.3.0
+pydantic_core==2.46.4
+pydantic==2.13.4
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.3
+PyYAML==6.0.3
+requests==2.34.2
+scipy==1.18.0
+setuptools==83.0.0
+simsimd==6.5.16
+six==1.17.0
+stringzilla==5.1.2
+sympy==1.14.0
+termcolor==3.3.0
+torch==2.13.0
+torchmetrics==1.9.0
+torchvision==0.28.0
+tqdm==4.70.0
+typing_extensions==4.16.0
+typing-inspection==0.4.4
+urllib3==2.7.0
+wheel==0.47.0

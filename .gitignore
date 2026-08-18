@@ -1,0 +1,85 @@
+# --- Never commit -----------------------------------------------------------
+# DINOv3 backbone checkpoints: gated download from Meta, user-supplied.
+*.pth
+weights/dinov3_*
+
+# Datasets (repo-root only; examples/data IS committed).
+/data/
+/datasets/
+
+# Training artifacts.
+/runs/
+notebooks/runs/
+
+# Secrets.
+.env
+.env.*
+!.env.example
+*.pem
+credentials.json
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Environments
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+.python-version
+
+# Testing / typing / linting caches
+.cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+.tox/
+.nox/
+cython_debug/
+
+# Jupyter
+.ipynb_checkpoints/
+profile_default/
+ipython_config.py
+
+# --- Editors / OS -----------------------------------------------------------
+.idea/
+.vscode/
+.history/
+.DS_Store
+Thumbs.db
+
+# SDD process notes (build logs, review diffs) -- never shipped.
+/.superpowers/

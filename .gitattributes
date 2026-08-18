@@ -1,0 +1,7 @@
+# Notebooks: readable diffs (nbstripout's textconv, output cells omitted)
+# and a filter contributors can wire up locally with `nbstripout --install`.
+# The actual guard against committing outputs is .githooks/pre-commit — this
+# filter is a convenience on top, not the enforcement mechanism. Activate the
+# hook with: git config core.hooksPath .githooks
+*.ipynb filter=nbstripout
+*.ipynb diff=ipynb
