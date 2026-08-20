@@ -23,6 +23,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from .crop_dataset import (
+    COUNTED_LABELS,
     IMAGES_DIRNAME,
     CropTileDataset,
     collate_val,
@@ -35,7 +36,7 @@ from .metrics import evaluate
 #: TrainConfig fields that are paths on the dataclass but strings in JSON.
 _PATH_FIELDS = ("data_root", "weights_dir", "out_dir")
 #: TrainConfig fields that must be tuples, not the lists JSON round-trips to.
-_TUPLE_FIELDS = ("exclude_label_statuses",)
+_TUPLE_FIELDS = ("exclude_label_statuses", "labels")
 
 
 @dataclass
@@ -69,6 +70,8 @@ class TrainConfig:
     scale_jitter: float = 0.25
     exclude_label_statuses: Tuple[str, ...] = ()
     num_workers: int = 4
+
+    labels: Optional[Tuple[str, ...]] = COUNTED_LABELS  # Point labels to count
 
     # Optimisation
     batch_size: int = 8
@@ -199,7 +202,9 @@ def build_loaders(
     """
     device = device or resolve_device(cfg.device)
     pin = device.type == "cuda"
-    train_recs, val_recs = load_splits(cfg.data_root, fmt=cfg.annotation_format)
+    train_recs, val_recs = load_splits(
+        cfg.data_root, fmt=cfg.annotation_format, labels=cfg.labels
+    )
 
     train_ds = CropTileDataset(
         train_recs, cfg.train_images_dir, train=True, tile=cfg.tile,
