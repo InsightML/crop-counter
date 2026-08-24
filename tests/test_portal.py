@@ -20,7 +20,7 @@ from cropcounter.portal import (
 )
 
 SAMPLE_IMAGE = sorted(
-    (Path(__file__).parent.parent / "examples" / "data" / "val" / "images").glob("*.jpg")
+    (Path(__file__).parent.parent / "examples"/ "demo" / "data" / "val" / "images").glob("*.jpg")
 )[0]
 
 
