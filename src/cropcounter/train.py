@@ -73,6 +73,8 @@ class TrainConfig:
 
     labels: Optional[Tuple[str, ...]] = COUNTED_LABELS  # Point labels to count
 
+    val_freq: int = 1
+
     # Optimisation
     batch_size: int = 8
     epochs: int = 50
@@ -179,6 +181,21 @@ def resolve_device(prefer: Optional[str] = None) -> torch.device:
     return torch.device("cpu")
 
 
+def should_validate(epoch: int, total_epochs: int, val_freq: int) -> bool:
+    """Whether to run full decode-metric validation on this 1-indexed epoch.
+
+    Always validates epoch 1 (baseline) and the final epoch (end-of-run
+    measurement); otherwise every ``val_freq``-th epoch. ``val_freq=1``
+    validates every epoch (the default, unchanged behaviour); a ``0`` or
+    negative ``val_freq`` is treated as 1.
+    """
+    return (
+        epoch == 1
+        or epoch == total_epochs
+        or epoch % max(val_freq, 1) == 0
+    )
+
+
 def seed_everything(seed: int) -> None:
     """Seed python, numpy and torch for reproducible runs."""
     random.seed(seed)
@@ -271,28 +288,43 @@ def load_checkpoint(
 
 
 def plot_history(history: Dict[str, List[float]], path: Path) -> None:
-    """Save loss / MAE / F1 / LR curves as a single PNG."""
+    """Save loss / MAE / F1 / LR curves as a single PNG.
+
+    Validation series are NaN on skipped epochs when ``val_freq > 1``. Those
+    NaNs are masked out and the surviving points drawn with markers, so sparse
+    (or single-epoch) validation curves stay visible rather than rendering as
+    an empty line between non-adjacent points.
+    """
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(1, 4, figsize=(18, 3.6))
-    epochs = range(1, len(history["train_loss"]) + 1)
+    epochs = np.arange(1, len(history["train_loss"]) + 1)
 
-    # Panel 0: train vs val focal loss together (val is tau-independent).
+    def plot_val(ax, key: str, **kwargs) -> None:
+        y = np.asarray(history[key], dtype=float)
+        mask = ~np.isnan(y)
+        ax.plot(epochs[mask], y[mask], marker="o", markersize=3, **kwargs)
+
+    # Panel 0: train (dense) vs val (possibly sparse) focal loss.
     axes[0].plot(epochs, history["train_loss"], color="#2b5f9e", label="train")
-    axes[0].plot(epochs, history["val_loss"], color="#c1440e", label="val")
+    plot_val(axes[0], "val_loss", color="#c1440e", label="val")
     axes[0].set_title("focal loss")
     axes[0].set_xlabel("epoch")
     axes[0].legend()
 
-    panels = [
-        ("val_count_mae", "val count MAE"),
-        ("val_f1", "val localization F1"),
-        ("lr", "learning rate"),
-    ]
-    for ax, (key, title) in zip(axes[1:], panels):
-        ax.plot(epochs, history[key], color="#2b5f9e")
+    for ax, (key, title) in zip(
+        axes[1:3],
+        [("val_count_mae", "val count MAE"), ("val_f1", "val localization F1")],
+    ):
+        plot_val(ax, key, color="#2b5f9e")
         ax.set_title(title)
         ax.set_xlabel("epoch")
+
+    # LR is recorded every epoch (never NaN), so a plain line is right.
+    axes[3].plot(epochs, history["lr"], color="#2b5f9e")
+    axes[3].set_title("learning rate")
+    axes[3].set_xlabel("epoch")
+
     fig.savefig(path, dpi=120, bbox_inches="tight")
     plt.close(fig)
 
@@ -366,36 +398,47 @@ def train(cfg: TrainConfig) -> Tuple[CropCounter, Dict[str, List[float]], str, i
         scheduler.step()
         train_loss = epoch_loss / max(n_batches, 1)
 
-        summary, _ = evaluate(
-            model, val_loader, device, tau=cfg.tau, k=cfg.k,
-            nms_radius=cfg.nms_radius, output_stride=cfg.output_stride,
-            match_radius_px=cfg.match_radius_px,
-            focal_alpha=cfg.focal_alpha, focal_beta=cfg.focal_beta,
-        )
-
         history["train_loss"].append(train_loss)
-        history["val_loss"].append(summary["val_loss"])
-        history["val_count_mae"].append(summary["count_mae"])
-        history["val_count_rmse"].append(summary["count_rmse"])
-        history["val_count_bias"].append(summary["count_bias"])
-        history["val_precision"].append(summary["precision"])
-        history["val_recall"].append(summary["recall"])
-        history["val_f1"].append(summary["f1"])
         history["lr"].append(optimizer.param_groups[0]["lr"])
 
-        marker = ""
-        if summary["val_loss"] < best_val_loss:
-            best_val_loss = summary["val_loss"]
-            best_epoch = epoch
-            _save_checkpoint(model, cfg, run_dir / "best.pt")
-            marker = "  <- best"
-        _save_checkpoint(model, cfg, run_dir / "last.pt")
+        if should_validate(epoch, cfg.epochs, cfg.val_freq):
+            summary, _ = evaluate(
+                model, val_loader, device, tau=cfg.tau, k=cfg.k,
+                nms_radius=cfg.nms_radius, output_stride=cfg.output_stride,
+                match_radius_px=cfg.match_radius_px,
+                focal_alpha=cfg.focal_alpha, focal_beta=cfg.focal_beta,
+                progress=True, desc=f"val {epoch}/{cfg.epochs}",
+            )
+            history["val_loss"].append(summary["val_loss"])
+            history["val_count_mae"].append(summary["count_mae"])
+            history["val_count_rmse"].append(summary["count_rmse"])
+            history["val_count_bias"].append(summary["count_bias"])
+            history["val_precision"].append(summary["precision"])
+            history["val_recall"].append(summary["recall"])
+            history["val_f1"].append(summary["f1"])
 
-        print(f"epoch {epoch:3d} | loss {train_loss:.4f} val {summary['val_loss']:.4f} | "
-              f"val MAE {summary['count_mae']:.2f} RMSE {summary['count_rmse']:.2f} "
-              f"bias {summary['count_bias']:+.2f} | "
-              f"P {summary['precision']:.3f} R {summary['recall']:.3f} "
-              f"F1 {summary['f1']:.3f} | lr {history['lr'][-1]:.2e}{marker}")
+            marker = ""
+            if summary["val_loss"] < best_val_loss:
+                best_val_loss = summary["val_loss"]
+                best_epoch = epoch
+                _save_checkpoint(model, cfg, run_dir / "best.pt")
+                marker = "  <- best"
+            _save_checkpoint(model, cfg, run_dir / "last.pt")
+
+            print(f"epoch {epoch:3d} | loss {train_loss:.4f} val {summary['val_loss']:.4f} | "
+                  f"val MAE {summary['count_mae']:.2f} RMSE {summary['count_rmse']:.2f} "
+                  f"bias {summary['count_bias']:+.2f} | "
+                  f"P {summary['precision']:.3f} R {summary['recall']:.3f} "
+                  f"F1 {summary['f1']:.3f} | lr {history['lr'][-1]:.2e}{marker}")
+        else:
+            # NaN-pad the val history so every array stays indexed by epoch and
+            # history.json stays rectangular (matplotlib renders NaN as gaps).
+            for key in ("val_loss", "val_count_mae", "val_count_rmse",
+                        "val_count_bias", "val_precision", "val_recall", "val_f1"):
+                history[key].append(float("nan"))
+            _save_checkpoint(model, cfg, run_dir / "last.pt")
+            print(f"epoch {epoch:3d} | loss {train_loss:.4f} | val — | "
+                  f"lr {history['lr'][-1]:.2e}")
 
         with open(run_dir / "history.json", "w") as fh:
             json.dump(history, fh, indent=2)
