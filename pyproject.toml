@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cropcounter"
-version = "0.1.1"
+version = "0.1.2"
 description = "Crop emergence counting from proximal RGB — frozen DINOv3 ConvNeXt backbone, pyramid decoder, point heatmap."
 readme = "README.md"
 requires-python = ">=3.12"
