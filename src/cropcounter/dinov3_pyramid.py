@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from .weights import WEIGHT_FILES, resolve_backbone_weights
 
 STAGE_CHANNELS = {
+    "tiny": (96, 192, 384, 768),
     "small": (96, 192, 384, 768),
     "base": (128, 256, 512, 1024),
     "large": (192, 384, 768, 1536),
