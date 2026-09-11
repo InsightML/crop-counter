@@ -72,13 +72,19 @@ def amp_dtype(device: torch.device) -> Optional[torch.dtype]:
     return torch.bfloat16 if major >= BF16_MIN_CUDA_MAJOR else torch.float16
 
 
-def autocast_context(device: torch.device) -> ContextManager[None]:
+def autocast_context(device: torch.device, enabled: bool = True) -> ContextManager[None]:
     """``torch.autocast`` in :func:`amp_dtype`'s dtype, or a no-op off CUDA.
 
     Wrap every forward pass in this rather than hard-coding a dtype, so one
     device check serves training, validation and inference alike.
+
+    Args:
+        enabled: ``False`` forces fp32 even on CUDA. The like-for-like setting
+            when a GPU result must be compared against an fp32 reference
+            produced elsewhere -- fp16 on a T4 shifts a dense count by a few,
+            which is a precision difference, not a model difference.
     """
-    dtype = amp_dtype(device)
+    dtype = amp_dtype(device) if enabled else None
     if dtype is None:
         return contextlib.nullcontext()
     return torch.autocast(torch.device(device).type, dtype=dtype)

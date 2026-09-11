@@ -92,6 +92,50 @@ def test_autocast_context_cuda_carries_the_chosen_dtype(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# autocast_context(enabled=False) / predict_prob(amp=False)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.filterwarnings("ignore:CUDA is not available:UserWarning")
+def test_autocast_context_disabled_is_fp32_even_on_cuda(monkeypatch):
+    """enabled=False is the like-for-like escape hatch: fp32 on any device.
+
+    A GPU count compared against an fp32 reference has to be produced in fp32,
+    or a T4's fp16 shifts a dense image's count and the comparison measures the
+    autocast dtype rather than the weights.
+    """
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_: (7, 5))
+    assert isinstance(autocast_context(torch.device("cuda"), enabled=False),
+                      contextlib.nullcontext)
+    assert isinstance(autocast_context(torch.device("cuda")), torch.autocast)
+
+
+def test_autocast_context_enabled_default_is_unchanged():
+    """The default is byte-identical to the no-keyword call."""
+    for spec in ("cpu", "mps"):
+        assert isinstance(autocast_context(torch.device(spec), enabled=True),
+                          contextlib.nullcontext)
+
+
+def test_predict_prob_forwards_amp_to_autocast_context(monkeypatch):
+    """predict_prob(amp=False) must reach autocast_context(enabled=False)."""
+    import cropcounter.inference as inference
+
+    seen = []
+
+    def spy(device, enabled=True):
+        seen.append(enabled)
+        return contextlib.nullcontext()
+
+    monkeypatch.setattr(inference, "autocast_context", spy)
+    model = torch.nn.Conv2d(3, 1, 1)
+    image = torch.zeros(3, 8, 8)
+    inference.predict_prob(model, image, torch.device("cpu"))
+    inference.predict_prob(model, image, torch.device("cpu"), amp=False)
+    assert seen == [True, False]
+
+
+# --------------------------------------------------------------------------- #
 # package surface
 # --------------------------------------------------------------------------- #
 

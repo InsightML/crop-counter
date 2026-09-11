@@ -67,17 +67,22 @@ def predict_prob(
     model: torch.nn.Module,
     image_tensor: torch.Tensor,
     device: Optional[torch.device] = None,
+    amp: bool = True,
 ) -> torch.Tensor:
     """Forward one padded image tensor (C, H, W) -> sigmoid prob map (1, 1, h, w).
 
     Runs under ``torch.no_grad``; autocast is used on CUDA only, in whichever
     dtype :func:`cropcounter.amp_dtype` picks for the GPU. The map comes back
     on the CPU as float32, ready for :func:`decode_in_bounds`.
+
+    Args:
+        amp: ``False`` forces fp32 even on CUDA, for a like-for-like comparison
+            against an fp32 reference (see :func:`cropcounter.autocast_context`).
     """
     if device is None:
         device = next(model.parameters()).device
     device = torch.device(device)
-    with torch.no_grad(), autocast_context(device):
+    with torch.no_grad(), autocast_context(device, enabled=amp):
         logits = model(image_tensor.unsqueeze(0).to(device))
     return torch.sigmoid(logits.float()).cpu()
 
