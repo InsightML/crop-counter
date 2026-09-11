@@ -6,7 +6,11 @@ config coercion, matching ``test_train_config.py``.
 """
 from __future__ import annotations
 
-from cropcounter.train import TrainConfig, should_validate
+import math
+
+import pytest
+
+from cropcounter.train import HISTORY_KEYS, TrainConfig, _append_history, should_validate
 
 
 def test_val_freq_default_is_one():
@@ -50,3 +54,40 @@ def test_val_freq_round_trip_through_dict():
 def test_val_freq_absent_from_json_uses_default():
     """An old config with no val_freq key still loads with the default 1."""
     assert TrainConfig.from_dict({"epochs": 5}).val_freq == 1
+
+
+# --------------------------------------------------------------------------- #
+# The skipped-epoch history row, for both task key sets
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("task", ["point", "box"])
+def test_append_history_pads_a_skipped_epoch_with_nan(task):
+    """summary=None NaN-pads every val series, so history.json stays rectangular.
+
+    plot_history masks the NaNs out; json.dump renders them as ``NaN``. The box
+    key set has to pad too, or a val_freq > 1 box run desynchronises its arrays
+    from the epoch index.
+    """
+    history = {key: [] for key in HISTORY_KEYS[task]}
+    _append_history(history, task, train_loss=1.5, lr=1e-3)
+
+    assert history["train_loss"] == [1.5] and history["lr"] == [1e-3]
+    val_keys = [k for k, v in HISTORY_KEYS[task].items() if v]
+    assert val_keys, "every task has at least one val series"
+    for key in val_keys:
+        assert len(history[key]) == 1 and math.isnan(history[key][0])
+    assert len({len(v) for v in history.values()}) == 1, "history must stay rectangular"
+
+
+@pytest.mark.parametrize("task", ["point", "box"])
+def test_append_history_with_a_summary_is_unchanged(task):
+    """The validated-epoch path still copies the summary straight through."""
+    summary = {v: 0.25 for v in HISTORY_KEYS[task].values() if v}
+    history = {key: [] for key in HISTORY_KEYS[task]}
+    _append_history(history, task, train_loss=2.0, lr=5e-4, summary=summary)
+
+    assert history["train_loss"] == [2.0]
+    for key, summary_key in HISTORY_KEYS[task].items():
+        if summary_key:
+            assert history[key] == [0.25]

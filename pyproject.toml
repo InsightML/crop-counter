@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cropcounter"
-version = "0.1.2"
+version = "0.2.0"
 description = "Crop emergence counting from proximal RGB — frozen DINOv3 ConvNeXt backbone, pyramid decoder, point heatmap."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -52,6 +52,10 @@ dependencies = [
 formats = ["datumaro"]
 # Client for the hosted InsightML portal API.
 portal = ["requests>=2.31", "python-dotenv>=1.0"]
+# COCO average precision for the box task (cropcounter.det_metrics). Kept out
+# of the core deps: the point counter never needs it, and pycocotools builds
+# from source on platforms without a wheel.
+detection = ["pycocotools>=2.0", "ijson>=3.2"]
 # Local development. nbconvert + ipykernel are here so the notebooks in
 # notebooks/ can be run — and executed headlessly as a check — from a plain
 # `pip install -e ".[dev]"`, not merely stripped of outputs by nbstripout.

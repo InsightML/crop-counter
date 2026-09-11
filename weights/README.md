@@ -64,7 +64,8 @@ argue 13 epochs is equivalent to 50.
 
 Re-measuring the shipped checkpoint on that split with this package gives MAE
 8.48 / F1 0.729 at `tau` = 0.35 — the ~0.1 MAE gap to the 8.59 above is
-fp32-on-MPS versus bf16-autocast-on-CUDA numerics, not a different model.
+fp32-on-MPS versus autocast-on-CUDA numerics (bf16 on Ampere+, fp16 below),
+not a different model.
 
 ### Sanitisation
 

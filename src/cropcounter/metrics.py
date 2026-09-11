@@ -15,6 +15,7 @@ from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
 from tqdm.auto import tqdm
 
+from .dinov3_pyramid import autocast_context
 from .heatmap import decode_peaks
 from .losses import penalty_reduced_focal_loss
 
@@ -97,7 +98,7 @@ def _iter_prob_maps(
     with torch.no_grad():
         for batch in iterator:
             image = batch["image"].to(device, non_blocking=True)
-            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
+            with autocast_context(device):
                 logits = model(image)
             logits = logits.float()
             loss: Optional[float] = None

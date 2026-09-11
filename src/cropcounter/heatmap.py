@@ -10,24 +10,53 @@ grid of the model head; ``decode_peaks`` converts back to input pixels.
 """
 from __future__ import annotations
 
+import functools
 from typing import Tuple, Union
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
+#: Decimal places the Gaussian-stamp cache rounds ``sigma`` to. Per-object
+#: sigmas come from a small integer radius ((2r+1)/6), so a handful of distinct
+#: values recur over and over; rounding makes them hashable cache keys without
+#: moving the stamp by anything a float32 target can hold.
+_SIGMA_CACHE_DP = 6
+
+
+@functools.lru_cache(maxsize=256)
+def _gaussian_stamp(radius: int, sigma: float) -> np.ndarray:
+    """A (2r+1, 2r+1) float32 Gaussian stamp with peak exactly 1.0 at its centre.
+
+    Cached because per-object sigmas (box targets) repeat heavily within an
+    epoch. The returned array is shared — treat it as read-only.
+    """
+    ax = np.arange(2 * radius + 1, dtype=np.float64) - radius
+    stamp = np.exp(-(ax[None, :] ** 2 + ax[:, None] ** 2) / (2.0 * sigma * sigma))
+    stamp = stamp.astype(np.float32)
+    stamp.flags.writeable = False
+    return stamp
+
+
+def _stamp_radius(sigma: float) -> int:
+    """Stamp half-width for a sigma: 3 sigma, never smaller than one cell."""
+    return max(1, int(round(3.0 * float(sigma))))
+
 
 def render_targets(
     points: np.ndarray,
     out_hw: Tuple[int, int],
-    sigma: float,
+    sigma: Union[float, np.ndarray],
 ) -> np.ndarray:
     """Render a peak-normalised Gaussian heatmap target.
 
     Args:
         points: (N, 2) array of (x, y) locations in output-grid coordinates.
         out_hw: (height, width) of the output grid.
-        sigma: Gaussian spread in output-grid cells.
+        sigma: Gaussian spread in output-grid cells. Either a scalar shared by
+            every point (the point-counting case) or an ``(N,)`` array of
+            per-point spreads (the box case, where CenterNet derives sigma from
+            each box's size — see :func:`cropcounter.boxmap.render_box_targets`).
 
     Returns:
         (H, W) float32 heatmap in [0, 1]. Each point contributes a Gaussian
@@ -41,13 +70,19 @@ def render_targets(
     if len(points) == 0:
         return heat
 
-    radius = max(1, int(round(3.0 * sigma)))
-    size = 2 * radius + 1
-    ax = np.arange(size, dtype=np.float64) - radius
-    stamp = np.exp(-(ax[None, :] ** 2 + ax[:, None] ** 2) / (2.0 * sigma * sigma))
-    stamp = stamp.astype(np.float32)
+    if np.ndim(sigma) == 0:
+        sigmas = np.full(len(points), float(sigma), dtype=np.float64)
+    else:
+        sigmas = np.asarray(sigma, dtype=np.float64).reshape(-1)
+        if sigmas.size != len(points):
+            raise ValueError(
+                f"sigma must be a scalar or one value per point, got {sigmas.size} "
+                f"for {len(points)} point(s)"
+            )
 
-    for x, y in points:
+    for (x, y), point_sigma in zip(points, sigmas):
+        radius = _stamp_radius(point_sigma)
+        stamp = _gaussian_stamp(radius, round(float(point_sigma), _SIGMA_CACHE_DP))
         cx = min(max(int(x), 0), out_w - 1)
         cy = min(max(int(y), 0), out_h - 1)
         x0, x1 = max(0, cx - radius), min(out_w, cx + radius + 1)

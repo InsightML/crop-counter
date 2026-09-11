@@ -25,7 +25,7 @@ import torch
 from PIL import Image
 
 from .crop_dataset import ImageRecord
-from .dinov3_pyramid import IMAGENET_MEAN, IMAGENET_STD
+from .dinov3_pyramid import IMAGENET_MEAN, IMAGENET_STD, autocast_context
 from .heatmap import decode_peaks
 
 #: Image extensions enumerated by :func:`records_from_folder`.
@@ -67,18 +67,22 @@ def predict_prob(
     model: torch.nn.Module,
     image_tensor: torch.Tensor,
     device: Optional[torch.device] = None,
+    amp: bool = True,
 ) -> torch.Tensor:
     """Forward one padded image tensor (C, H, W) -> sigmoid prob map (1, 1, h, w).
 
-    Runs under ``torch.no_grad``; bf16 autocast is used on CUDA only. The map
-    comes back on the CPU as float32, ready for :func:`decode_in_bounds`.
+    Runs under ``torch.no_grad``; autocast is used on CUDA only, in whichever
+    dtype :func:`cropcounter.amp_dtype` picks for the GPU. The map comes back
+    on the CPU as float32, ready for :func:`decode_in_bounds`.
+
+    Args:
+        amp: ``False`` forces fp32 even on CUDA, for a like-for-like comparison
+            against an fp32 reference (see :func:`cropcounter.autocast_context`).
     """
     if device is None:
         device = next(model.parameters()).device
     device = torch.device(device)
-    with torch.no_grad(), torch.autocast(
-        device.type, torch.bfloat16, enabled=device.type == "cuda"
-    ):
+    with torch.no_grad(), autocast_context(device, enabled=amp):
         logits = model(image_tensor.unsqueeze(0).to(device))
     return torch.sigmoid(logits.float()).cpu()
 
