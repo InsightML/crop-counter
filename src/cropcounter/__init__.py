@@ -18,12 +18,14 @@ __version__ = "0.1.0"
 _LAZY_ATTRS = {
     # data
     "COUNTED_LABELS": "crop_dataset",
+    "Box": "crop_dataset",
     "CropTileDataset": "crop_dataset",
     "ImageRecord": "crop_dataset",
     "Point": "crop_dataset",
     "collate_val": "crop_dataset",
     "load_records": "crop_dataset",
     "load_splits": "crop_dataset",
+    "parse_coco_detection": "crop_dataset",
     "parse_coco_keypoints": "crop_dataset",
     "parse_cvat_1_1": "crop_dataset",
     "parse_datumaro": "crop_dataset",
@@ -31,14 +33,26 @@ _LAZY_ATTRS = {
     "CropCounter": "dinov3_pyramid",
     "DinoV3Backbone": "dinov3_pyramid",
     "PyramidDecoder": "dinov3_pyramid",
-    # heatmap + loss + metrics
+    # heatmap + boxmap + loss + metrics
     "decode_peaks": "heatmap",
     "point_nms": "heatmap",
     "render_targets": "heatmap",
+    "decode_boxes": "boxmap",
+    "gaussian_radius": "boxmap",
+    "render_box_targets": "boxmap",
+    "masked_l1_loss": "losses",
     "penalty_reduced_focal_loss": "losses",
     "evaluate": "metrics",
     "match_points": "metrics",
     "sweep_tau": "metrics",
+    # detection metrics (needs the optional `detection` extra at call time)
+    "coco_eval": "det_metrics",
+    "evaluate_boxes": "det_metrics",
+    "match_box_centres": "det_metrics",
+    "match_boxes_iou": "det_metrics",
+    "read_coco_results": "det_metrics",
+    "summarise_boxes": "det_metrics",
+    "write_coco_results": "det_metrics",
     # inference
     "decode_in_bounds": "inference",
     "predict_prob": "inference",
@@ -96,17 +110,20 @@ except ImportError:  # pragma: no cover - exercised by not installing the extra
 __all__ = [
     # model
     "DinoV3Backbone", "PyramidDecoder", "CropCounter",
-    # heatmap + loss + metrics
+    # heatmap + boxmap + loss + metrics
     "decode_peaks", "point_nms", "render_targets",
-    "penalty_reduced_focal_loss",
+    "decode_boxes", "gaussian_radius", "render_box_targets",
+    "penalty_reduced_focal_loss", "masked_l1_loss",
     "evaluate", "match_points", "sweep_tau",
+    "coco_eval", "evaluate_boxes", "match_boxes_iou", "match_box_centres",
+    "summarise_boxes", "write_coco_results", "read_coco_results",
     # training
     "TrainConfig", "build_loaders", "build_model", "load_checkpoint",
     "resolve_device", "train",
     # data
-    "COUNTED_LABELS", "ImageRecord", "Point", "CropTileDataset", "collate_val",
+    "COUNTED_LABELS", "ImageRecord", "Point", "Box", "CropTileDataset", "collate_val",
     "load_records", "load_splits",
-    "parse_cvat_1_1", "parse_coco_keypoints", "parse_datumaro",
+    "parse_cvat_1_1", "parse_coco_keypoints", "parse_coco_detection", "parse_datumaro",
     # inference
     "records_from_folder", "predict_prob", "decode_in_bounds",
     "save_visualization", "write_cvat_xml",
