@@ -433,6 +433,61 @@ def test_parse_coco_detection_round_trip(tmp_path):
     assert second.source_dataset == "cfd" and second.is_train is False
 
 
+def test_parse_coco_detection_accepts_string_ids_and_empty_markers(tmp_path):
+    """Real CFD metadata: image ids are filename strings, annotation ids are
+    int for some sources and str for others, and "reviewed, nothing here" is
+    recorded as a bbox-less annotation in an ``empty`` category."""
+    payload = {
+        "images": [
+            {"id": "torsi_20190716-021037.129.JPG", "file_name": "torsi_1.JPG",
+             "width": 960, "height": 540, "dataset": "torsi", "is_train": False},
+            {"id": "brackish_00123.jpg.rf.9ab3f1", "file_name": "brackish_00123.jpg",
+             "width": 960, "height": 540, "dataset": "brackish", "is_train": True},
+        ],
+        "categories": [{"id": 0, "name": "empty"}, {"id": 1, "name": "fish"}],
+        "annotations": [
+            {"id": 1, "image_id": "torsi_20190716-021037.129.JPG", "category_id": 1,
+             "bbox": [40.0, 50.0, 46.0, 30.0], "area": 1380.0, "iscrowd": 0},
+            {"id": "ann-str-2", "image_id": "torsi_20190716-021037.129.JPG",
+             "category_id": 1, "bbox": [400.0, 200.0, 52.0, 44.0], "area": 2288.0,
+             "iscrowd": 0},
+            # Empty marker: no bbox, category 0.
+            {"id": "ann-str-3", "image_id": "brackish_00123.jpg.rf.9ab3f1",
+             "category_id": 0, "iscrowd": 0},
+        ],
+    }
+    path = tmp_path / "annotations.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    records = parse_coco_detection(path)
+    assert [r.image_id for r in records] == [
+        "torsi_20190716-021037.129.JPG", "brackish_00123.jpg.rf.9ab3f1"
+    ]
+    assert all(isinstance(r.image_id, str) for r in records)
+    assert len(records[0].boxes) == 2
+    assert records[0].width == 960 and records[0].height == 540
+    # The empty marker does not become a box, and the frame stays a negative.
+    assert records[1].boxes == []
+    assert records[1].source_dataset == "brackish" and records[1].is_train is True
+
+
+def test_parse_coco_detection_skips_empty_marker_even_with_a_bbox(tmp_path):
+    payload = {
+        "images": [{"id": "a", "file_name": "a.jpg", "width": 960, "height": 540}],
+        "categories": [{"id": 0, "name": "empty"}, {"id": 1, "name": "fish"}],
+        "annotations": [
+            {"id": 1, "image_id": "a", "category_id": 0,
+             "bbox": [0.0, 0.0, 960.0, 540.0], "iscrowd": 0},
+            {"id": 2, "image_id": "a", "category_id": 1,
+             "bbox": [10.0, 10.0, 46.0, 46.0], "iscrowd": 0},
+        ],
+    }
+    path = tmp_path / "annotations.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    (record,) = parse_coco_detection(path)
+    assert [b.label for b in record.boxes] == ["fish"]
+
+
 def test_parse_coco_detection_label_filter(tmp_path):
     records = parse_coco_detection(_write_tiny_coco(tmp_path), labels=("fish",))
     assert [b.label for b in records[0].boxes] == ["fish"]
@@ -625,14 +680,15 @@ def _synthetic_coco_dataset(tmp_path: Path, n_empty: int = 1) -> Path:
         images.append({"id": i + 1, "file_name": name, "width": 800, "height": 600,
                        "dataset": "synthetic", "is_train": i == 0})
         if i == 0 or n_empty == 0:
-            for j, (x, y, w, h) in enumerate(
-                [(100.0, 80.0, 60.0, 40.0), (400.0, 300.0, 120.0, 90.0),
-                 (650.0, 450.0, 70.0, 70.0)]
-            ):
-                annotations.append({
-                    "id": len(annotations) + 1, "image_id": i + 1, "category_id": 1,
-                    "bbox": [x, y, w, h], "area": w * h, "iscrowd": 0,
-                })
+            # A 4x3 lattice at 200 px pitch: any 256 px crop contains a centre,
+            # so "retry until a box survives" succeeds without flaking.
+            for x in (60.0, 260.0, 460.0, 660.0):
+                for y in (60.0, 260.0, 460.0):
+                    w, h = 80.0, 60.0
+                    annotations.append({
+                        "id": len(annotations) + 1, "image_id": i + 1, "category_id": 1,
+                        "bbox": [x, y, w, h], "area": w * h, "iscrowd": 0,
+                    })
     payload = {"images": images, "categories": [{"id": 1, "name": "fish"}],
                "annotations": annotations}
     (root / "annotations.json").write_text(json.dumps(payload), encoding="utf-8")
@@ -701,16 +757,18 @@ def test_box_dataset_sampler_is_deterministic_given_the_torch_seed(tmp_path):
 
     root = _synthetic_coco_dataset(tmp_path)
     records = load_records(root, fmt="coco_bbox", labels=None)
+    ds = CropTileDataset(records, root / "images", train=True, tile=256, task="box",
+                         augment_profile="natural", negative_tile_fraction=0.5,
+                         tiles_per_image=4)
 
     def draw():
         torch.manual_seed(1234)
-        np.random.seed(1234)
-        ds = CropTileDataset(records, root / "images", train=True, tile=256, task="box",
-                             augment_profile="natural", negative_tile_fraction=0.5,
-                             tiles_per_image=4)
-        return [int(ds[i][2]) for i in range(len(ds))]
+        return [ds._draw_box_record() for _ in range(32)]
 
-    assert draw() == draw()
+    first = draw()
+    assert first == draw()
+    # 0.5 negatives over one positive and one empty record: both get drawn.
+    assert {expect for _, expect in first} == {True, False}
 
 
 def test_box_dataset_val_item_carries_boxes_and_image_id(tmp_path):
@@ -721,18 +779,18 @@ def test_box_dataset_val_item_carries_boxes_and_image_id(tmp_path):
     ds = CropTileDataset(records, root / "images", train=False, task="box", output_stride=4)
     item = ds[0]
     assert item["image_id"] == 1
-    assert item["boxes"].shape == (3, 4)
+    assert item["boxes"].shape == (12, 4)
     assert item["width"] == 800 and item["height"] == 600
     # Padded to a multiple of 32: 800 x 600 -> 800 x 608.
     assert item["image"].shape == (3, 608, 800)
     assert item["target"]["heatmap"].shape == (1, 152, 200)
-    assert item["target"]["mask"].sum().item() == 3
+    assert item["target"]["mask"].sum().item() == 12
 
     batch = collate_val([item])
     assert batch["image"].shape == (1, 3, 608, 800)
     assert batch["target"]["heatmap"].shape == (1, 1, 152, 200)
     assert batch["image_id"] == 1
-    assert batch["boxes"].shape == (3, 4)
+    assert batch["boxes"].shape == (12, 4)
 
 
 def test_point_val_item_and_collate_unchanged(tmp_path):

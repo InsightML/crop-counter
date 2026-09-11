@@ -64,6 +64,15 @@ def read_coco_results(path: Path) -> List[Dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 
 
+def _sorted_ids(ids: Iterable[Any]) -> List[Any]:
+    """De-duplicate and (where the ids are mutually comparable) sort them."""
+    unique = list(dict.fromkeys(ids))
+    try:
+        return sorted(unique)
+    except TypeError:  # mixed int/str ids — order does not affect the result
+        return unique
+
+
 def _load_coco(gt: Union[Path, str, Dict[str, Any], Any]):
     """Coerce a path / in-memory COCO dict / ``COCO`` object into a ``COCO``."""
     from pycocotools.coco import COCO
@@ -82,7 +91,7 @@ def _load_coco(gt: Union[Path, str, Dict[str, Any], Any]):
 def coco_eval(
     gt: Union[Path, str, Dict[str, Any], Any],
     detections: Sequence[Dict[str, Any]],
-    image_ids: Optional[Sequence[int]] = None,
+    image_ids: Optional[Sequence[Any]] = None,
 ) -> Dict[str, float]:
     """Score COCO-results ``detections`` against ``gt`` with ``pycocotools``.
 
@@ -110,9 +119,10 @@ def coco_eval(
     with contextlib.redirect_stdout(io.StringIO()):
         coco_dt = coco_gt.loadRes([dict(d) for d in detections])
         evaluator = COCOeval(coco_gt, coco_dt, iouType="bbox")
-        evaluator.params.imgIds = (
-            sorted(int(i) for i in image_ids) if image_ids is not None
-            else sorted(coco_gt.getImgIds())
+        # Ids pass through un-cast (COCOeval handles string ids); sorted only
+        # for a stable evaluation order, and only when they are comparable.
+        evaluator.params.imgIds = _sorted_ids(
+            image_ids if image_ids is not None else coco_gt.getImgIds()
         )
         evaluator.evaluate()
         evaluator.accumulate()
@@ -243,7 +253,7 @@ def evaluate_boxes(
     output_stride: int = 4,
     size_parameterisation: str = "log",
     match_iou: float = 0.5,
-    category_id: int = DEFAULT_CATEGORY_ID,
+    category_id: Any = DEFAULT_CATEGORY_ID,
     loss_fn: Optional[Callable[[Dict[str, torch.Tensor], Dict[str, torch.Tensor]], float]] = None,
 ) -> Tuple[Dict[str, float], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Evaluate a box-task model over a whole-image validation loader.
@@ -289,7 +299,8 @@ def evaluate_boxes(
             prob = torch.sigmoid(outputs["heatmap"]).cpu()
             wh, off = outputs["wh"].cpu(), outputs["off"].cpu()
             width, height = int(batch["width"]), int(batch["height"])
-            image_id = int(batch["image_id"])
+            # Never cast: COCO image ids are as often filename strings as ints.
+            image_id = batch["image_id"]
             seen_ids.append(image_id)
             gt_xyxy = boxes_xywh_to_xyxy(batch["boxes"])
 
@@ -300,7 +311,7 @@ def evaluate_boxes(
             ap_boxes = clip_boxes_xyxy(ap_boxes, width, height)
             for box, score in zip(boxes_xyxy_to_xywh(ap_boxes), ap_scores):
                 detections.append({
-                    "image_id": image_id, "category_id": int(category_id),
+                    "image_id": image_id, "category_id": category_id,
                     "bbox": [float(v) for v in box], "score": float(score),
                 })
 

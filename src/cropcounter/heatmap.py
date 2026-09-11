@@ -70,14 +70,15 @@ def render_targets(
     if len(points) == 0:
         return heat
 
-    sigmas = np.asarray(sigma, dtype=np.float64).reshape(-1)
-    if sigmas.size == 1:
-        sigmas = np.repeat(sigmas, len(points))
-    elif sigmas.size != len(points):
-        raise ValueError(
-            f"sigma must be a scalar or one value per point, got {sigmas.size} "
-            f"for {len(points)} point(s)"
-        )
+    if np.ndim(sigma) == 0:
+        sigmas = np.full(len(points), float(sigma), dtype=np.float64)
+    else:
+        sigmas = np.asarray(sigma, dtype=np.float64).reshape(-1)
+        if sigmas.size != len(points):
+            raise ValueError(
+                f"sigma must be a scalar or one value per point, got {sigmas.size} "
+                f"for {len(points)} point(s)"
+            )
 
     for (x, y), point_sigma in zip(points, sigmas):
         radius = _stamp_radius(point_sigma)
