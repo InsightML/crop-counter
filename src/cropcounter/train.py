@@ -37,7 +37,7 @@ from .crop_dataset import (
     resolve_annotations,
 )
 from .det_metrics import evaluate_boxes, write_coco_results
-from .dinov3_pyramid import CropCounter
+from .dinov3_pyramid import CropCounter, amp_dtype, autocast_context
 from .losses import masked_l1_loss, penalty_reduced_focal_loss
 from .metrics import evaluate
 
@@ -465,8 +465,10 @@ def train(cfg: TrainConfig) -> Tuple[CropCounter, Dict[str, List[float]], str, i
     model = build_model(cfg, device)
     n_trainable = sum(p.numel() for p in model.trainable_parameters())
     frozen_note = " (fusion trunk frozen)" if cfg.freeze_fusion else ""
+    dtype = amp_dtype(device)
+    amp_note = str(dtype).removeprefix("torch.") if dtype is not None else "off (fp32)"
     print(f"backbone {cfg.backbone} frozen; decoder params: {n_trainable / 1e6:.2f}M"
-          f"{frozen_note} | device {device}")
+          f"{frozen_note} | device {device} | autocast {amp_note}")
 
     optimizer = torch.optim.AdamW(
         model.trainable_parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
@@ -481,7 +483,9 @@ def train(cfg: TrainConfig) -> Tuple[CropCounter, Dict[str, List[float]], str, i
         optimizer, [warmup, cosine], milestones=[max(cfg.warmup_epochs, 1)]
     )
 
-    use_amp = device.type == "cuda"
+    # fp16 (pre-Ampere CUDA) underflows gradients without loss scaling; bf16 has
+    # fp32's exponent range and needs none, so it keeps the unscaled path.
+    scaler = torch.amp.GradScaler("cuda") if dtype is torch.float16 else None
     history: Dict[str, List[float]] = {key: [] for key in HISTORY_KEYS[cfg.task]}
     best_val_loss = float("inf")
     best_epoch = 0
@@ -494,14 +498,23 @@ def train(cfg: TrainConfig) -> Tuple[CropCounter, Dict[str, List[float]], str, i
             images = images.to(device, non_blocking=True)
             targets = _targets_to_device(targets, device)
 
-            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
+            with autocast_context(device):
                 outputs = model(images)
             loss, n_pos = _batch_loss(cfg, outputs, targets)
 
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.trainable_parameters(), cfg.grad_clip)
-            optimizer.step()
+            if scaler is None:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.trainable_parameters(), cfg.grad_clip)
+                optimizer.step()
+            else:
+                # unscale_ first, or clip_grad_norm_ would clip the SCALED
+                # gradients and cfg.grad_clip would mean nothing.
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.trainable_parameters(), cfg.grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
 
             epoch_loss += loss.item()
             epoch_pos += n_pos

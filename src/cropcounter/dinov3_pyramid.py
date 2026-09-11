@@ -20,8 +20,9 @@ would add keys and break that load.
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import ContextManager, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -47,6 +48,39 @@ GEOMETRY_WIDTH = 128
 #: place a zero-offset detection at the cell CENTRE, so 0.5 — not 0.0 — is the
 #: "no sub-cell correction" prior.
 OFFSET_BIAS_INIT = 0.5
+
+#: Compute capability at which CUDA gains native bfloat16 tensor cores (Ampere,
+#: sm_80). Below it — Turing T4 (sm_75), the free Colab GPU — bf16 is emulated:
+#: cuDNN convolutions can refuse it outright with CUDNN_STATUS_NOT_SUPPORTED,
+#: and where they do run they are slower than fp16.
+BF16_MIN_CUDA_MAJOR = 8
+
+
+def amp_dtype(device: torch.device) -> Optional[torch.dtype]:
+    """The mixed-precision dtype to autocast to on ``device``, or None for fp32.
+
+    * CUDA, compute capability >= 8.0 (Ampere and later): ``torch.bfloat16``.
+    * CUDA, below that (Turing/Volta/Pascal, e.g. the Colab T4): ``torch.float16``
+      — which needs a :class:`torch.amp.GradScaler` when training.
+    * Anything else (MPS, CPU): ``None``, i.e. autocast stays off.
+    """
+    device = torch.device(device)
+    if device.type != "cuda":
+        return None
+    major, _minor = torch.cuda.get_device_capability(device)
+    return torch.bfloat16 if major >= BF16_MIN_CUDA_MAJOR else torch.float16
+
+
+def autocast_context(device: torch.device) -> ContextManager[None]:
+    """``torch.autocast`` in :func:`amp_dtype`'s dtype, or a no-op off CUDA.
+
+    Wrap every forward pass in this rather than hard-coding a dtype, so one
+    device check serves training, validation and inference alike.
+    """
+    dtype = amp_dtype(device)
+    if dtype is None:
+        return contextlib.nullcontext()
+    return torch.autocast(torch.device(device).type, dtype=dtype)
 
 
 class DinoV3Backbone(nn.Module):

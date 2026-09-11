@@ -33,6 +33,9 @@ _LAZY_ATTRS = {
     "CropCounter": "dinov3_pyramid",
     "DinoV3Backbone": "dinov3_pyramid",
     "PyramidDecoder": "dinov3_pyramid",
+    # mixed precision
+    "amp_dtype": "dinov3_pyramid",
+    "autocast_context": "dinov3_pyramid",
     # heatmap + boxmap + loss + metrics
     "decode_peaks": "heatmap",
     "point_nms": "heatmap",
@@ -110,6 +113,7 @@ except ImportError:  # pragma: no cover - exercised by not installing the extra
 __all__ = [
     # model
     "DinoV3Backbone", "PyramidDecoder", "CropCounter",
+    "amp_dtype", "autocast_context",
     # heatmap + boxmap + loss + metrics
     "decode_peaks", "point_nms", "render_targets",
     "decode_boxes", "gaussian_radius", "render_box_targets",

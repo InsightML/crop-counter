@@ -27,6 +27,7 @@ import torch
 from scipy.optimize import linear_sum_assignment
 
 from .boxmap import boxes_xywh_to_xyxy, boxes_xyxy_to_xywh, clip_boxes_xyxy, decode_boxes
+from .dinov3_pyramid import autocast_context
 from .metrics import match_points
 
 #: COCOeval's 12 summary statistics, in the order ``COCOeval.stats`` holds them.
@@ -285,8 +286,7 @@ def evaluate_boxes(
     with torch.no_grad():
         for batch in loader:
             image = batch["image"].to(device, non_blocking=True)
-            with torch.autocast(device.type, dtype=torch.bfloat16,
-                                enabled=device.type == "cuda"):
+            with autocast_context(device):
                 outputs = model(image)
             outputs = {name: value.float() for name, value in outputs.items()}
 
