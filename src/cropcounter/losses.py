@@ -38,3 +38,34 @@ def penalty_reduced_focal_loss(
     loss = torch.where(pos_mask, pos_loss, neg_loss).sum()
     n_pos = pos_mask.sum().clamp(min=1)
     return loss / n_pos
+
+
+def masked_l1_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    """L1 over a dense regression map, restricted to the annotated cells.
+
+    The box head's ``wh`` and ``off`` targets exist only at each object's
+    integer centre cell; every other cell holds a zero that means "no
+    supervision here", not "predict zero". Averaging over the whole map would
+    therefore train the head to collapse to zero everywhere.
+
+    Args:
+        pred: (B, C, H, W) predicted map.
+        target: (B, C, H, W) target map, meaningful only where ``mask`` is 1.
+        mask: (B, 1, H, W) or (B, C, H, W) indicator. A single-channel mask is
+            broadcast across the channels first, so the normaliser counts
+            supervised *elements* — matching CenterNet's ``RegL1Loss``, which
+            expands the mask before summing.
+
+    Returns:
+        Scalar mean absolute error over the masked elements; exactly 0.0 (never
+        NaN) when nothing is masked, which is what an all-empty batch needs.
+    """
+    weight = mask.to(pred.dtype)
+    if weight.shape != pred.shape:
+        weight = weight.expand_as(pred)
+    loss = ((pred - target).abs() * weight).sum()
+    return loss / weight.sum().clamp(min=1)
