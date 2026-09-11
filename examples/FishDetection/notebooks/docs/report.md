@@ -27,7 +27,7 @@ Frozen-backbone detection heads are well-trodden: ViTDet (frozen/plain ViT backb
 5. **LILA's own `is_train` caveat** (location info not always available; same backgrounds may straddle splits) inflates every in-domain number, ours and theirs. Protocol B (leave-one-source-out) is the trustworthy headline, not this.
 6. **Seeds.** ≥2 seeds on the headline config before any claim; Stage 0c is one seed and is treated as a go/no-go, not a result.
 7. **Kill criterion (fixed now):** frozen head **AP50 < ~0.5 while RF-DETR-Nano > ~0.8** on Brackish val ⇒ the frozen-trunk premise fails for underwater imagery → rescope to partial unfreeze (last ConvNeXt stage) or to the label-efficiency claim alone.
-8. **Linear-probe reading (fixed now):** non-trivial AP with the fuse trunk frozen too ⇒ DINOv3 features are near-linearly box-decodable (thesis strong). Near-zero while the full decoder works ⇒ the story is the *decoder*, not the *features*.
+8. **Linear-probe reading (fixed now):** non-trivial AP with the fuse trunk frozen too ⇒ DINOv3 features are near-linearly box-decodable (thesis strong). Near-zero while the full decoder works ⇒ the story is the *decoder*, not the *features*. That reading only holds when the frozen trunk is a *trained* one: the first probe run froze a **randomly initialised** fuse trunk — `build_model` constructed a fresh decoder and nothing loaded the wheat weights into it — so its numbers describe a random trunk rather than the features and are reported as **uninformative**, while the informative variant seeds the trunk from the wheat decoder before freezing (`config_linearprobe_wheatinit.json`, `init_decoder_from: weights/decoder_best.pt`).
 9. Any throughput/speed claim is **measured** in the notebook or not made.
 
 ## Results
