@@ -1122,7 +1122,9 @@ def rescale_annotations(document: Dict[str, Any], scales: Dict[Any, Tuple[int, i
     """Return a copy of a COCO document scaled to the fetched pixel sizes.
 
     ``scales`` maps image id -> ``(width, height, scale)``. Each image gains a
-    ``cfd_scale`` field; every bbox and area is multiplied by the same factor.
+    ``cfd_scale`` field and its ``file_name`` becomes the on-disk basename (the
+    master path is kept as ``cfd_file_name``); every bbox and area is multiplied
+    by the same factor.
     Images absent from ``scales`` (download failed) keep their native geometry
     and ``cfd_scale`` 1.0.
     """
@@ -1134,6 +1136,13 @@ def rescale_annotations(document: Dict[str, Any], scales: Dict[Any, Tuple[int, i
             image.get("id"), (image.get("width"), image.get("height"), 1.0)
         )
         record["width"], record["height"], record["cfd_scale"] = width, height, round(scale, 6)
+        # ``annotations.json`` describes what is on disk: fetch writes every image
+        # as ``images/<basename>``, so ``file_name`` must be the bare basename or
+        # the training loader looks for a ``JPEGImages/`` sub-folder that never
+        # existed. The master's path survives as ``cfd_file_name``.
+        raw_name = str(image.get("file_name", "")).replace("\\", "/")
+        record["cfd_file_name"] = raw_name
+        record["file_name"] = raw_name.rsplit("/", 1)[-1]
         images.append(record)
     by_id = {img["id"]: img["cfd_scale"] for img in images}
 

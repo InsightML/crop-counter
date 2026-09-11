@@ -626,3 +626,19 @@ def test_cli_runs_manifest_and_subset(master_zip, tmp_path, capsys):
     summary = json.loads((tmp_path / "s" / "subset_summary.json").read_text())
     assert summary["group_by_sequence"] is False and summary["seed"] == 3
     assert summary["n_images"] == {"train": 8, "val": 8}
+
+
+def test_fetch_rewrites_file_name_to_the_on_disk_basename(fetched):
+    """The loader resolves ``images_dir / file_name``; after fetch the images sit
+    at ``images/<basename>``, so ``file_name`` must be the bare basename (the
+    smoke run on real Brackish frames failed on ``JPEGImages/...``)."""
+    out, _result, _calls = fetched
+    for split in ("train", "val"):
+        split_dir = Path(out) / split
+        document = json.loads((split_dir / "annotations.json").read_text(encoding="utf-8"))
+        native = json.loads((split_dir / "annotations.native.json").read_text(encoding="utf-8"))
+        native_names = {img["id"]: img["file_name"] for img in native["images"]}
+        for image in document["images"]:
+            assert "/" not in image["file_name"]
+            assert (split_dir / "images" / image["file_name"]).exists()
+            assert image["cfd_file_name"] == native_names[image["id"]]
