@@ -32,7 +32,7 @@ Frozen-backbone detection heads are well-trodden: ViTDet (frozen/plain ViT backb
 
 ## Results
 
-| Model | Input | Trainable M | Total M | GFLOPs | AP | AP50 | AP75 | AR100 | F1 @IoU.5 (τ=0.3) |
+| Model | Input | Trainable M | Total M | GFLOPs | AP | AP50 | AP75 | AR100 | F1 @IoU.5 (τ = calibrated, see Tuning) |
 |---|---|---|---|---|---|---|---|---|---|
 | Frozen DINOv3-B + decoder + box head (`brackish_frozen_s0`) | 1024 long side | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
 | Linear probe: fuse trunk frozen too, 2 ep (`brackish_linearprobe_s0`) | 1024 long side | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
@@ -41,6 +41,40 @@ Frozen-backbone detection heads are well-trodden: ViTDet (frozen/plain ViT backb
 **Stage 0a — green (2026-09-11).** `tests/test_boxmap.py`: 57 tests; GT `(hm, wh, off)` → `decode_boxes` recovers all boxes to < 1e-3 px in both `log` and `linear` parameterisations and `coco_eval` scores AP = AP50 = 1.0; peak exactly 1.0; radius monotonic and equal to CenterNet's formula; `top_k` truncation and IoU-NMS verified; `parse_coco_detection` round-trips string ids and skips `empty` markers. Whole suite **169 passed**, ruff clean. Simulated CFD-like frames (960×540, median 46 px boxes): stride-4 centre-cell collisions 0.01 % at 10 fish/frame, 0.08 % at 50 — the empirical case against a stride-2 decoder.
 **Stage 0c manifest facts (real metadata, `manifest/manifest.md`, streamed in 22 s):** Brackish in CFD = **14,674 frames / 14,120 boxes / 89 clips**, native **960×540** (so the 1024 long-side cap does not resize it), median box **45.7 px** (0.048 of the long side), **60.2 % of frames empty**, stride-4 centre-cell collision rate **0.0 %**. Published split: train 11,547 frames (71 clips, 12,155 boxes) / val 3,127 frames (18 clips, 1,965 boxes, 1,740 empty) — **clip-clean, 0 sequence overlap**, which independently validates both LILA's split and our sequence key. Whole-CFD context: 1,903,035 images / 935,049 boxes (matches LILA exactly), **64.8 % empty overall**, `is_train` never missing; TORSI collides at 15.6 % at stride 4 (every other source ≤ 0.8 %) — it needs a finer head or dropping in Stage 2.
 Throughput probe (img/s, GPU util by `num_workers`): TBD.
+
+## Tuning
+
+`tau` is the decode confidence threshold: heatmap peaks scoring below it never become predictions. Every P/R/F1 the go/no-go run printed used the config's reference `tau` 0.3 — a number fixed before the run and never tuned — so § 4 of [`4_evaluate.ipynb`](../4_evaluate.ipynb) calibrates it exactly as the wheat example does (`WheatHead` report § 5): one forward pass over Brackish val, decoded **once** at `ap_tau` 0.01, then every `tau` from 0.05 to 0.75 in steps of 0.05 applied as a mask over that one decoded set (`det_metrics.sweep_tau_boxes`). The whole sweep costs one epoch of inference, not fifteen.
+
+![Tau sweep on Brackish val: count MAE (red, left axis) against localisation F1 (blue, right axis), dashed line at the chosen tau.](images/tau_sweep.png)
+
+Figure T1. TBD — the `tau` sweep on the val set with the best epoch and the run's own NMS setting. Written by the notebook to `docs/images/tau_sweep.png` and to Drive `results/viz/tau_sweep.png`.
+
+**Choice of `tau` — TBD.** The chosen `tau` is the **argmin of count MAE** = **TBD**; the F1-argmax `tau` = **TBD**. Both are persisted in `results/tau_calibration.json` (keys `best_tau`, `f1_argmax_tau`, with the full per-`tau` rows under `sweep`), and neither is retyped from memory into this memo. The two ought to agree — the best localisation should also be the lowest count error, and the wheat run had both at 0.2. If they disagree on this data the gap *is* the finding: a threshold whose over- and under-counts cancel to a flattering mean while localisation is worse. Per rule 2, that is written up as ambiguous, with both numbers quoted, rather than resolved in whichever direction reads better.
+
+**AP / AP50 / AP75 / AR100 did not move, and could not have.** They integrate over the score axis, so they are threshold-independent by construction: no choice of `tau` can change them. The sweep therefore does not report them, and the AP columns of the Results table above are untouched by calibration — only the operating-point column (P/R/F1 and the counts) is recomputed at the calibrated `tau`, from the same `predictions.json` the AP is scored on.
+
+**NMS — TBD.** `box_nms_iou` was `null` for the go/no-go run: the 3×3 local-max peak test alone deduplicates cleanly when boxes do not overlap much, which Brackish's 0.0 % stride-4 centre-cell collision rate suggested would hold. The comparison below is run at the calibrated `tau`, with suppression **inside** the decode and before any thresholding — NMS ranks by score and has to see the whole candidate set, so each setting costs its own pass.
+
+| NMS IoU | Precision | Recall | F1 | count MAE | n_pred |
+|---|---|---|---|---|---|
+| none | TBD | TBD | TBD | TBD | TBD |
+| 0.5 | TBD | TBD | TBD | TBD | TBD |
+| 0.6 | TBD | TBD | TBD | TBD | TBD |
+
+Table T1. NMS comparison at the calibrated `tau` — source: `results/tau_calibration.json`, key `nms`. **Decision: TBD.** The wheat run raised its point-NMS radius from 1.5 to 5 after spot checks showed duplicate points on smeared heatmap regions; whether the box head needs the IoU analogue underwater is an open question here, and Figure T2 is the evidence it is answered on, not the aggregate alone.
+
+![NMS spot check: four val frames with at least three GT fish, NMS off on the left and NMS 0.5 on the right, GT green and ours red.](images/nms_compare.png)
+
+Figure T2. TBD — four val frames carrying ≥ 3 GT fish, NMS off (left) vs NMS 0.5 (right) at the calibrated `tau`, GT green · ours red. `docs/images/nms_compare.png` and Drive `results/viz/nms_compare.png`. Look for: one fish wearing two boxes (the case NMS exists for) against a real fish lost to suppression (the case it costs).
+
+| Model | Config | MAE | RMSE | Bias | Precision | Recall | F1 |
+|---|---|---|---|---|---|---|---|
+| best epoch (val-loss) | NMS off | TBD | TBD | TBD | TBD | TBD | TBD |
+| best epoch (val-loss) | NMS 0.5 | TBD | TBD | TBD | TBD | TBD | TBD |
+| last epoch | NMS 0.5 | TBD | TBD | TBD | TBD | TBD | TBD |
+
+Table T2. Validation metrics at the calibrated `tau` | IoU 0.5 | top-k 100. Generated by the notebook as `results/tuning_table.md` and pasted here verbatim. **Best epoch means lowest validation loss** — the rule `train.py` writes `best.pt` on — not best AP; the last epoch is carried alongside because the wheat run showed the two trading count accuracy against F1, and that trade has to be shown, not chosen silently.
 
 ## Visual spot checks
 
