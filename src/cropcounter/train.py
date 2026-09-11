@@ -19,7 +19,7 @@ import argparse
 import json
 import random
 import time
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -37,12 +37,12 @@ from .crop_dataset import (
     resolve_annotations,
 )
 from .det_metrics import evaluate_boxes, write_coco_results
-from .dinov3_pyramid import CropCounter, amp_dtype, autocast_context
+from .dinov3_pyramid import CropCounter, PyramidDecoder, amp_dtype, autocast_context
 from .losses import masked_l1_loss, penalty_reduced_focal_loss
 from .metrics import evaluate
 
 #: TrainConfig fields that are paths on the dataclass but strings in JSON.
-_PATH_FIELDS = ("data_root", "weights_dir", "out_dir")
+_PATH_FIELDS = ("data_root", "weights_dir", "out_dir", "init_decoder_from")
 #: TrainConfig fields that must be tuples, not the lists JSON round-trips to.
 _TUPLE_FIELDS = ("exclude_label_statuses", "labels")
 
@@ -128,6 +128,14 @@ class TrainConfig:
     #: whether frozen DINOv3 features are near-linearly box-decodable through a
     #: fixed fuse trunk.
     freeze_fusion: bool = False
+    #: Optional decoder checkpoint (a ``best.pt``/``last.pt``, or the shipped
+    #: ``weights/decoder_best.pt``) to initialise the decoder from before
+    #: training — and, crucially, before ``freeze_fusion`` freezes anything.
+    #: Only shape-compatible tensors are taken, so a point checkpoint can seed
+    #: a box run's trunk (``laterals``/``blocks``/``head``) while ``geometry``
+    #: stays at its init. Without this, ``freeze_fusion`` would freeze a
+    #: RANDOM trunk and the "linear probe" would measure nothing.
+    init_decoder_from: Optional[Path] = None
 
     # Runtime
     #: torch device string ("cuda", "mps", "cpu"); None auto-detects — see
@@ -304,12 +312,91 @@ def build_loaders(
     return train_loader, val_loader, train_recs, val_recs
 
 
+def _key_preview(keys: List[str], limit: int = 4) -> str:
+    """``[a, b, +3 more]`` — keeps the init report to one readable line."""
+    if not keys:
+        return "[]"
+    shown = ", ".join(keys[:limit])
+    extra = f", +{len(keys) - limit} more" if len(keys) > limit else ""
+    return f"[{shown}{extra}]"
+
+
+def init_decoder_from_checkpoint(
+    decoder: PyramidDecoder, path: Path
+) -> Dict[str, List[str]]:
+    """Seed ``decoder`` in place from a saved checkpoint, tensor by tensor.
+
+    Takes only the entries whose names AND shapes match the target decoder, so
+    one checkpoint can initialise a differently-shaped run rather than failing
+    it: the wheat point decoder (``weights/decoder_best.pt``) carries
+    ``laterals.*``, ``blocks.*`` and ``head.*`` but no ``geometry.*``, so a box
+    run inherits the whole fusion trunk and leaves the geometry branch at its
+    init. A checkpoint trained at a different ``c_dec`` or ``output_stride``
+    simply contributes fewer tensors instead of raising.
+
+    This exists for ``freeze_fusion``: freezing is only a linear probe of the
+    *features* if the trunk being held still is a trained one. Call this
+    BEFORE :meth:`PyramidDecoder.freeze_fusion`.
+
+    Args:
+        decoder: the freshly constructed decoder to initialise, modified in place.
+        path: a checkpoint written by :func:`_save_checkpoint` (a payload with
+            a ``"decoder"`` key), or a bare decoder ``state_dict``.
+
+    Returns:
+        ``{"loaded", "shape_mismatch", "missing", "unexpected"}`` — sorted key
+        lists. ``missing`` are target tensors left at their init (a box run's
+        ``geometry.*``); ``unexpected`` are checkpoint tensors with no home here.
+    """
+    path = Path(path)
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    source: Dict[str, torch.Tensor] = (
+        payload["decoder"] if isinstance(payload, dict) and "decoder" in payload else payload
+    )
+    target = decoder.state_dict()
+
+    take: Dict[str, torch.Tensor] = {}
+    shape_mismatch: List[str] = []
+    unexpected: List[str] = []
+    for key, tensor in source.items():
+        if key not in target:
+            unexpected.append(key)
+        elif tuple(target[key].shape) != tuple(tensor.shape):
+            shape_mismatch.append(key)
+        else:
+            take[key] = tensor
+
+    incompatible = decoder.load_state_dict(take, strict=False)
+    report = {
+        "loaded": sorted(take),
+        "shape_mismatch": sorted(shape_mismatch),
+        "missing": sorted(incompatible.missing_keys),
+        "unexpected": sorted(unexpected),
+    }
+    print(
+        f"init_decoder_from {path}: loaded {len(report['loaded'])} tensor(s)"
+        f" | skipped {len(report['shape_mismatch'])} on shape"
+        f" {_key_preview(report['shape_mismatch'])}"
+        f" | {len(report['missing'])} left at init {_key_preview(report['missing'])}"
+        f" | {len(report['unexpected'])} unused in checkpoint"
+        f" {_key_preview(report['unexpected'])}"
+    )
+    return report
+
+
 def build_model(cfg: TrainConfig, device: torch.device) -> CropCounter:
-    """Construct the model on the target device."""
+    """Construct the model on the target device.
+
+    Order matters: an ``init_decoder_from`` checkpoint is loaded BEFORE
+    ``freeze_fusion`` freezes the trunk, so the linear probe holds trained
+    fusion weights still rather than random ones.
+    """
     model = CropCounter(
         backbone_size=cfg.backbone, weights_dir=cfg.weights_dir,
         c_dec=cfg.c_dec, output_stride=cfg.output_stride, task=cfg.task,
     )
+    if cfg.init_decoder_from is not None:
+        init_decoder_from_checkpoint(model.decoder, Path(cfg.init_decoder_from))
     if cfg.freeze_fusion:
         model.decoder.freeze_fusion()
     return model.to(device)
@@ -428,7 +515,12 @@ def load_checkpoint(
     cfg = TrainConfig.from_dict(dict(payload["config"]))
     if weights_dir is not None:
         cfg.weights_dir = Path(weights_dir)
-    model = build_model(cfg, device)
+    # ``init_decoder_from`` is a *training* setting: this checkpoint's own
+    # weights are loaded strictly on the next line, so re-seeding from the run's
+    # init checkpoint would be wasted work -- and a hard failure whenever that
+    # file is not sitting where it was at training time. The returned config
+    # keeps the field, for provenance; only the build ignores it.
+    model = build_model(replace(cfg, init_decoder_from=None), device)
     model.decoder.load_state_dict(payload["decoder"])
     return model, cfg
 
