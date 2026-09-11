@@ -32,7 +32,7 @@ Frozen-backbone detection heads are well-trodden: ViTDet (frozen/plain ViT backb
 
 ## Results
 
-| Model | Input | Trainable M | Total M | GFLOPs | AP | AP50 | AP75 | AR100 | F1 @IoU.5 (τ = calibrated, see Tuning) |
+| Model | Input | Trainable M | Total M | GFLOPs | AP | AP50 | AP75 | AR100 | F1 @IoU.5 (τ per row = calibrated, see Tuning) |
 |---|---|---|---|---|---|---|---|---|---|
 | Frozen DINOv3-B + decoder + box head (`brackish_frozen_s0`) | 1024 long side | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
 | Linear probe: fuse trunk frozen too, 2 ep (`brackish_linearprobe_s0`) | 1024 long side | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
@@ -44,37 +44,46 @@ Throughput probe (img/s, GPU util by `num_workers`): TBD.
 
 ## Tuning
 
-`tau` is the decode confidence threshold: heatmap peaks scoring below it never become predictions. Every P/R/F1 the go/no-go run printed used the config's reference `tau` 0.3 — a number fixed before the run and never tuned — so § 4 of [`4_evaluate.ipynb`](../4_evaluate.ipynb) calibrates it exactly as the wheat example does (`WheatHead` report § 5): one forward pass over Brackish val, decoded **once** at `ap_tau` 0.01, then every `tau` from 0.05 to 0.75 in steps of 0.05 applied as a mask over that one decoded set (`det_metrics.sweep_tau_boxes`). The whole sweep costs one epoch of inference, not fifteen.
+`tau` is the decode confidence threshold: heatmap peaks scoring below it never become predictions. Every P/R/F1 the go/no-go run printed used the config's reference `tau` 0.3 — a number fixed before the run and never tuned — so § 4 of [`4_evaluate.ipynb`](../4_evaluate.ipynb) calibrates it as the wheat example does (`WheatHead` report § 5): one forward pass over Brackish val, decoded **once** at `ap_tau` 0.01, then every `tau` from 0.05 to 0.75 in steps of 0.05 applied as a mask over that one decoded set (`det_metrics.sweep_tau_boxes`). The whole sweep costs one epoch of inference, not fifteen.
 
-![Tau sweep on Brackish val: count MAE (red, left axis) against localisation F1 (blue, right axis), dashed line at the chosen tau.](images/tau_sweep.png)
+**Both checkpoints are calibrated, and the last epoch is the headline.** `train.py` writes `best.pt` on lowest *validation loss*. On this run that selector disagreed with every detection metric: it stopped at an earlier epoch while AP, AP50, AP75 and F1 all kept improving through to the last one (see the Results table's paired rows). The head anyone would actually ship is therefore `last.pt`, and it — not `best.pt` — is the headline number in this memo. Its optimal `tau` need not equal `best.pt`'s either: the score distribution keeps moving as the cosine anneals and the geometry branch converges, so each checkpoint is swept on the same grid and **reported at its own `tau`**, never at one borrowed threshold. Whether the two agree is a finding in itself and the notebook prints it as a one-line verdict.
 
-Figure T1. TBD — the `tau` sweep on the val set with the best epoch and the run's own NMS setting. Written by the notebook to `docs/images/tau_sweep.png` and to Drive `results/viz/tau_sweep.png`.
+Selecting on val loss and then reporting the epoch it did not pick needs saying out loud rather than quietly swapping: the val-loss rule is the house convention (it is what the wheat example uses, and it is checkpoint selection that never touches the test set), it simply turns out to be the wrong proxy here. The honest reading is that **on Brackish the box head's val loss is a poor model-selection signal**, which is itself reportable and which Stage 1 should fix by selecting on val AP50 instead — not something to paper over by quoting `last.pt` as if it had been chosen all along.
 
-**Choice of `tau` — TBD.** The chosen `tau` is the **argmin of count MAE** = **TBD**; the F1-argmax `tau` = **TBD**. Both are persisted in `results/tau_calibration.json` (keys `best_tau`, `f1_argmax_tau`, with the full per-`tau` rows under `sweep`), and neither is retyped from memory into this memo. The two ought to agree — the best localisation should also be the lowest count error, and the wheat run had both at 0.2. If they disagree on this data the gap *is* the finding: a threshold whose over- and under-counts cancel to a flattering mean while localisation is worse. Per rule 2, that is written up as ambiguous, with both numbers quoted, rather than resolved in whichever direction reads better.
+![Tau sweep on Brackish val, one panel per checkpoint: count MAE (red, left axis) against localisation F1 (blue, right axis), dashed line at each panel's chosen tau.](images/tau_sweep.png)
 
-**AP / AP50 / AP75 / AR100 did not move, and could not have.** They integrate over the score axis, so they are threshold-independent by construction: no choice of `tau` can change them. The sweep therefore does not report them, and the AP columns of the Results table above are untouched by calibration — only the operating-point column (P/R/F1 and the counts) is recomputed at the calibrated `tau`, from the same `predictions.json` the AP is scored on.
+Figure T1. TBD — the `tau` sweep on the val set, **left: `best.pt` (best epoch by val loss), right: `last.pt` (last epoch, the headline)**, both at the run's own NMS setting. Written by the notebook to `docs/images/tau_sweep.png` and to Drive `results/viz/tau_sweep.png`.
 
-**NMS — TBD.** `box_nms_iou` was `null` for the go/no-go run: the 3×3 local-max peak test alone deduplicates cleanly when boxes do not overlap much, which Brackish's 0.0 % stride-4 centre-cell collision rate suggested would hold. The comparison below is run at the calibrated `tau`, with suppression **inside** the decode and before any thresholding — NMS ranks by score and has to see the whole candidate set, so each setting costs its own pass.
+**Choice of `tau` — TBD.** Each checkpoint's `tau` is the **argmin of its own count MAE**: `best.pt` → **TBD**, `last.pt` (headline) → **TBD**. The F1-argmax `tau` for each is **TBD** / **TBD**. All of it is persisted in `results/tau_calibration.json` — top-level `best_tau` is the **headline (`last.pt`) `tau`** so the results-table cell and any older reader keep working unchanged, `best_tau_bestckpt` carries `best.pt`'s own, `headline_checkpoint` names which is which, and the full per-`tau` rows sit under `best.sweep` / `last.sweep`. Nothing here is retyped from memory into this memo.
 
-| NMS IoU | Precision | Recall | F1 | count MAE | n_pred |
-|---|---|---|---|---|---|
-| none | TBD | TBD | TBD | TBD | TBD |
-| 0.5 | TBD | TBD | TBD | TBD | TBD |
-| 0.6 | TBD | TBD | TBD | TBD | TBD |
+Within a checkpoint, the MAE-argmin and the F1-argmax `tau` ought to agree — the best localisation should also be the lowest count error, and the wheat run had both at 0.2. Where they disagree the gap *is* the finding: a threshold whose over- and under-counts cancel to a flattering mean while localisation is worse. Per rule 2, that is written up as ambiguous, with both numbers quoted, rather than resolved in whichever direction reads better. The same applies across checkpoints: if `best.pt` and `last.pt` calibrate to different `tau`, the memo says so and reports each at its own, because a single shared threshold would silently hand one checkpoint an operating point it was never tuned for.
 
-Table T1. NMS comparison at the calibrated `tau` — source: `results/tau_calibration.json`, key `nms`. **Decision: TBD.** The wheat run raised its point-NMS radius from 1.5 to 5 after spot checks showed duplicate points on smeared heatmap regions; whether the box head needs the IoU analogue underwater is an open question here, and Figure T2 is the evidence it is answered on, not the aggregate alone.
+**AP / AP50 / AP75 / AR100 did not move, and could not have.** They integrate over the score axis, so they are threshold-independent by construction: no choice of `tau` can change them, for either checkpoint. The sweep therefore does not report them, and the AP columns of the Results table above are untouched by calibration — only the operating-point columns (P/R/F1 and the counts) are recomputed at the calibrated `tau`, from the same detection files the AP is scored on. `train.py` only saves `predictions.json` for the best-val-loss epoch, so § 4 additionally decodes `predictions_last.json` for the last epoch at the identical `ap_tau`, top-k, NMS setting and frame clipping; that is what lets the last-epoch row carry a rescored AP and an operating point instead of history-only numbers.
 
-![NMS spot check: four val frames with at least three GT fish, NMS off on the left and NMS 0.5 on the right, GT green and ours red.](images/nms_compare.png)
+**NMS — TBD.** `box_nms_iou` was `null` for the go/no-go run: the 3×3 local-max peak test alone deduplicates cleanly when boxes do not overlap much, which Brackish's 0.0 % stride-4 centre-cell collision rate suggested would hold. The comparison below runs each checkpoint at its own calibrated `tau`, with suppression **inside** the decode and before any thresholding — NMS ranks by score and has to see the whole candidate set, so each setting costs its own pass. The headline `last.pt` gets the full grid; `best.pt` gets off vs 0.5, enough to show the decision does not flip between the two checkpoints.
 
-Figure T2. TBD — four val frames carrying ≥ 3 GT fish, NMS off (left) vs NMS 0.5 (right) at the calibrated `tau`, GT green · ours red. `docs/images/nms_compare.png` and Drive `results/viz/nms_compare.png`. Look for: one fish wearing two boxes (the case NMS exists for) against a real fish lost to suppression (the case it costs).
+| Checkpoint | τ | NMS IoU | Precision | Recall | F1 | count MAE | n_pred |
+|---|---|---|---|---|---|---|---|
+| last epoch (headline) | TBD | none | TBD | TBD | TBD | TBD | TBD |
+| last epoch (headline) | TBD | 0.5 | TBD | TBD | TBD | TBD | TBD |
+| last epoch (headline) | TBD | 0.6 | TBD | TBD | TBD | TBD | TBD |
+| best epoch (val-loss) | TBD | none | TBD | TBD | TBD | TBD | TBD |
+| best epoch (val-loss) | TBD | 0.5 | TBD | TBD | TBD | TBD | TBD |
+
+Table T1. NMS comparison, each checkpoint at its own calibrated `tau` — source: `results/tau_calibration.json`, key `nms` (`nms.last`, `nms.best`). **Decision: TBD.** The wheat run raised its point-NMS radius from 1.5 to 5 after spot checks showed duplicate points on smeared heatmap regions; whether the box head needs the IoU analogue underwater is an open question here, and Figure T2 is the evidence it is answered on, not the aggregate alone.
+
+![NMS spot check on the last-epoch checkpoint: four val frames with at least three GT fish, NMS off on the left and NMS 0.5 on the right, GT green and ours red.](images/nms_compare.png)
+
+Figure T2. TBD — four val frames carrying ≥ 3 GT fish, NMS off (left) vs NMS 0.5 (right) on the **headline `last.pt`** at its calibrated `tau`, GT green · ours red. `docs/images/nms_compare.png` and Drive `results/viz/nms_compare.png`. Look for: one fish wearing two boxes (the case NMS exists for) against a real fish lost to suppression (the case it costs).
 
 | Model | Config | MAE | RMSE | Bias | Precision | Recall | F1 |
 |---|---|---|---|---|---|---|---|
-| best epoch (val-loss) | NMS off | TBD | TBD | TBD | TBD | TBD | TBD |
-| best epoch (val-loss) | NMS 0.5 | TBD | TBD | TBD | TBD | TBD | TBD |
-| last epoch | NMS 0.5 | TBD | TBD | TBD | TBD | TBD | TBD |
+| best epoch (val-loss) | NMS off @τ=TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| best epoch (val-loss) | NMS 0.5 @τ=TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| last epoch | NMS off @τ=TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| last epoch | NMS 0.5 @τ=TBD | TBD | TBD | TBD | TBD | TBD | TBD |
 
-Table T2. Validation metrics at the calibrated `tau` | IoU 0.5 | top-k 100. Generated by the notebook as `results/tuning_table.md` and pasted here verbatim. **Best epoch means lowest validation loss** — the rule `train.py` writes `best.pt` on — not best AP; the last epoch is carried alongside because the wheat run showed the two trading count accuracy against F1, and that trade has to be shown, not chosen silently.
+Table T2. Validation metrics **at per-row `tau`, not one global `tau`** — each row carries the threshold its own checkpoint calibrated to, in the Config column | IoU 0.5 | top-k 100. Generated by the notebook as `results/tuning_table.md` and pasted here verbatim. **Best epoch means lowest validation loss** — the rule `train.py` writes `best.pt` on — not best AP. **Headline checkpoint = the last epoch**, because that selector stopped early while every detection metric kept improving; both are tabulated so the trade is shown, not chosen silently.
 
 ## Visual spot checks
 
