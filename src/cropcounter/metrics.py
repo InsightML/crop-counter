@@ -13,6 +13,7 @@ import numpy as np
 import torch
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
+from tqdm.auto import tqdm
 
 from .dinov3_pyramid import autocast_context
 from .heatmap import decode_peaks
@@ -77,15 +78,25 @@ def _iter_prob_maps(
     device: torch.device,
     focal_alpha: float = 2.0,
     focal_beta: float = 4.0,
+    progress: bool = False,
+    desc: str = "val",
 ) -> Iterable[Tuple[torch.Tensor, np.ndarray, str, Optional[float]]]:
     """Yield (prob_map, gt_points, name, loss) per validation image.
 
     ``loss`` is the penalty-reduced focal loss against the batch's heatmap
     target (tau-independent), or ``None`` when the loader carries no target.
+    Set ``progress`` to show a per-image tqdm bar labelled ``desc``.
     """
     model.eval()
+    iterator = loader
+    if progress:
+        try:
+            total = len(loader)
+        except TypeError:  # pragma: no cover - loader without __len__
+            total = None
+        iterator = tqdm(loader, total=total, desc=desc, leave=False)
     with torch.no_grad():
-        for batch in loader:
+        for batch in iterator:
             image = batch["image"].to(device, non_blocking=True)
             with autocast_context(device):
                 logits = model(image)
@@ -111,11 +122,14 @@ def evaluate(
     match_radius_px: float = 24.0,
     focal_alpha: float = 2.0,
     focal_beta: float = 4.0,
+    progress: bool = False,
+    desc: str = "val",
 ) -> Tuple[Dict[str, float], List[Dict]]:
     """Evaluate counting + localization over a whole-image val loader.
 
     Also averages the penalty-reduced focal loss against the heatmap targets,
     a tau-independent measure of heatmap fidelity, reported as ``val_loss``.
+    Set ``progress`` to show a per-image tqdm bar labelled ``desc``.
 
     Returns:
         (summary, per_image_rows). Summary keys: count_mae, count_rmse,
@@ -124,7 +138,8 @@ def evaluate(
     rows: List[Dict] = []
     losses: List[float] = []
     for prob, gt, name, loss in _iter_prob_maps(
-        model, loader, device, focal_alpha=focal_alpha, focal_beta=focal_beta
+        model, loader, device, focal_alpha=focal_alpha, focal_beta=focal_beta,
+        progress=progress, desc=desc,
     ):
         pred, _ = decode_peaks(prob, k=k, tau=tau, nms_radius=nms_radius, stride=output_stride)
         tp, fp, fn = match_points(pred, gt, match_radius_px)

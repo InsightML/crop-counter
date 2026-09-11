@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import numpy as np
 import torch
 from scipy.optimize import linear_sum_assignment
+from tqdm.auto import tqdm
 
 from .boxmap import boxes_xywh_to_xyxy, boxes_xyxy_to_xywh, clip_boxes_xyxy, decode_boxes
 from .dinov3_pyramid import autocast_context
@@ -256,6 +257,8 @@ def evaluate_boxes(
     match_iou: float = 0.5,
     category_id: Any = DEFAULT_CATEGORY_ID,
     loss_fn: Optional[Callable[[Dict[str, torch.Tensor], Dict[str, torch.Tensor]], float]] = None,
+    progress: bool = False,
+    desc: str = "val",
 ) -> Tuple[Dict[str, float], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Evaluate a box-task model over a whole-image validation loader.
 
@@ -272,6 +275,8 @@ def evaluate_boxes(
             :func:`cropcounter.train._batch_loss` bound to the run config.
             Injected rather than imported to keep ``train`` -> ``det_metrics``
             a one-way dependency.
+        progress: show a per-image tqdm bar labelled ``desc``, matching
+            :func:`cropcounter.metrics.evaluate`.
 
     Returns:
         ``(summary, per_image_rows, detections)``. Summary keys: the COCO stats,
@@ -283,8 +288,16 @@ def evaluate_boxes(
     losses: List[float] = []
     seen_ids: List[int] = []
 
+    iterator = loader
+    if progress:
+        try:
+            total = len(loader)
+        except TypeError:  # pragma: no cover - loader without __len__
+            total = None
+        iterator = tqdm(loader, total=total, desc=desc, leave=False)
+
     with torch.no_grad():
-        for batch in loader:
+        for batch in iterator:
             image = batch["image"].to(device, non_blocking=True)
             with autocast_context(device):
                 outputs = model(image)

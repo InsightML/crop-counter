@@ -17,6 +17,7 @@ from typing import Optional
 
 #: Backbone size -> the filename Meta ships for the LVD-1689M pretrained ConvNeXt.
 WEIGHT_FILES = {
+    "tiny": "dinov3_convnext_tiny_pretrain_lvd1689m-21b726bb.pth",
     "small": "dinov3_convnext_small_pretrain_lvd1689m-296db49d.pth",
     "base": "dinov3_convnext_base_pretrain_lvd1689m-801f2ba9.pth",
     "large": "dinov3_convnext_large_pretrain_lvd1689m-61fa432d.pth",

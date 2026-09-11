@@ -1,7 +1,7 @@
 """PyTorch library for the DINOv3 ConvNeXt pyramid-decoder crop emergence counter."""
 from importlib import import_module
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 #: Public attribute -> the submodule that defines it. Resolved lazily (PEP 562)
 #: rather than imported here, for two reasons:
