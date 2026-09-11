@@ -86,12 +86,22 @@ Two exceptions are forced by the real metadata:
   `brackish_dataset`, `roboflow_fish` and `marine_detect`) is removed first.
   Leaving it on makes every frame its own sequence and grouping a no-op.
 
-Grouping is only as good as the filenames. `coralscapes` (Cityscapes-style
-names ending in `_leftImg8bit`), `kakadu` (bare integers) and `torsi`
-(per-second timestamps) all end up at roughly one sequence per image; check the
-`sequences` column against `n_images` before trusting a cap to be group-aware.
-For `noaa_puget`, `mit_river_herring` and `coralscapes` the master also carries
-a `location` field, which is a better grouping key than the filename.
+Grouping is only as good as the filenames, and it fails in both directions —
+always read the `sequences` column against `n_images` before trusting a cap to
+be group-aware:
+
+- **No grouping at all** (one sequence per image): `noaa_puget`, `kakadu`
+  (bare integers), `fathomnet` (UUIDs), `coralscapes` (Cityscapes-style
+  `_leftImg8bit` names) and `torsi` (per-second timestamps). A cap there is
+  just uniform image sampling.
+- **Over-grouping** (everything collapses into one or two keys):
+  `project_natick` gives 1 sequence for 1,072 images and `zebrafish` 2 for
+  2,224. Harmless — the single sequence overshoots the cap and is decimated
+  uniformly, which is again uniform sampling — but it is not the leakage
+  protection it looks like.
+
+`noaa_puget`, `mit_river_herring` and `coralscapes` also carry a `location`
+field in the master, which is a better grouping key than the filename.
 
 ## `fetch`
 
@@ -117,6 +127,14 @@ locally:
 from cropcounter.cfd import fetch_subset
 fetch_subset("data/brackish", max_side=1024, workers=32, mirror="gcs")
 ```
+
+## Cost of a real run
+
+Against the published 47 MB zip (1.1 GB of JSON, 1,903,035 images, 935,049
+boxes) on a laptop: `manifest` takes ~22s and peaks at ~1.0 GB RSS — it holds
+one packed int per image plus one `(image_id, cell)` tuple per box. `subset`
+for a single source is ~11s and ~130 MB, since only that source's images are
+buffered; `--sources all` is closer to `manifest`.
 
 ## Licences
 
