@@ -1,0 +1,7 @@
+model,"F1 @IoU.5 (τ per row, see Tuning)",ap,ap50,ap75,ap_rescored,ar100,count_mae @τ,epoch,gflops,input,precision @τ,recall @τ,total_params_M,trainable_params_M,τ
+brackish_frozen_s0,0.6509,0.2274,0.5855,0.1087,0.2274,0.3368,0.238,4,477.0,1024 long side,0.7104,0.6005,91.1,3.58,0.35
+brackish_frozen_s0 · last epoch,0.6979,0.291,0.674,0.17,0.291,0.3983,0.251,8,477.0,1024 long side,0.741,0.6595,91.1,3.58,0.35
+brackish_linearprobe_s0,0.0,0.0062,0.0286,0.0005,0.0062,0.1244,0.626,2,477.0,1024 long side,0.0,0.0,91.1,3.58,0.35
+brackish_linearprobe_wheatinit_s0,0.0,0.0004,0.0017,0.0,0.0004,0.0823,0.628,1,477.0,1024 long side,0.0,0.0,91.1,3.58,0.35
+brackish_linearprobe_wheatinit_s0 · last epoch,,0.0004,0.0019,0.0,,0.0902,,2,477.0,1024 long side,,,91.1,3.58,
+"rfdetr_nano_640 (released, likely saw these images)",,0.4925,0.79,0.5248,,0.645,,,97.3,640,,,,,
