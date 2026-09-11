@@ -55,6 +55,8 @@ _LAZY_ATTRS = {
     "match_boxes_iou": "det_metrics",
     "read_coco_results": "det_metrics",
     "summarise_boxes": "det_metrics",
+    "sweep_tau_boxes": "det_metrics",
+    "sweep_tau_from_detections": "det_metrics",
     "write_coco_results": "det_metrics",
     # inference
     "decode_in_bounds": "inference",
@@ -121,6 +123,7 @@ __all__ = [
     "evaluate", "match_points", "sweep_tau",
     "coco_eval", "evaluate_boxes", "match_boxes_iou", "match_box_centres",
     "summarise_boxes", "write_coco_results", "read_coco_results",
+    "sweep_tau_boxes", "sweep_tau_from_detections",
     # training
     "TrainConfig", "build_loaders", "build_model", "load_checkpoint",
     "resolve_device", "train",

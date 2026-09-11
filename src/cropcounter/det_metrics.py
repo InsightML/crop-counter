@@ -341,3 +341,161 @@ def evaluate_boxes(
     summary.update(coco_eval(gt, detections, image_ids=seen_ids))
     summary["val_loss"] = float(np.mean(losses)) if losses else float("nan")
     return summary, rows, detections
+
+
+# --------------------------------------------------------------------------- #
+# tau calibration
+# --------------------------------------------------------------------------- #
+
+
+def sweep_tau_from_detections(
+    per_image: Iterable[Tuple[np.ndarray, np.ndarray, np.ndarray]],
+    taus: Sequence[float],
+    match_iou: float = 0.5,
+) -> List[Dict[str, float]]:
+    """Sweep the operating threshold over already-decoded per-image detections.
+
+    The pure half of :func:`sweep_tau_boxes`: no model, no loader, no GPU. It
+    is what lets a notebook re-calibrate from a saved ``predictions.json``
+    months after the run, and what the unit tests exercise.
+
+    Args:
+        per_image: an iterable of ``(boxes_xyxy, scores, gt_xyxy)`` — one tuple
+            per image, boxes in xyxy pixels, decoded once at a low ``ap_tau``.
+            Consumed lazily, so a generator streams.
+        taus: operating thresholds to score. Each keeps ``scores > tau``,
+            the same strict comparison :func:`evaluate_boxes` uses.
+        match_iou: IoU gate for :func:`match_boxes_iou`.
+
+    Returns:
+        One :func:`summarise_boxes` dict per tau, with a ``"tau"`` key added.
+
+    Note:
+        AP / AP50 / AP75 are deliberately absent: they integrate over the score
+        axis and so are threshold-independent — sweeping tau cannot move them.
+    """
+    taus = [float(t) for t in taus]
+    per_tau: List[List[Dict[str, Any]]] = [[] for _ in taus]
+    for boxes_xyxy, scores, gt_xyxy in per_image:
+        boxes = np.asarray(boxes_xyxy, dtype=np.float64).reshape(-1, 4)
+        score = np.asarray(scores, dtype=np.float64).reshape(-1)
+        gt = np.asarray(gt_xyxy, dtype=np.float64).reshape(-1, 4)
+        for i, tau in enumerate(taus):
+            kept = boxes[score > tau]
+            tp, fp, fn = match_boxes_iou(kept, gt, iou_thr=match_iou)
+            per_tau[i].append({
+                "n_gt": len(gt), "n_pred": len(kept), "tp": tp, "fp": fp, "fn": fn,
+            })
+
+    summaries: List[Dict[str, float]] = []
+    for tau, rows in zip(taus, per_tau):
+        summary = summarise_boxes(rows)
+        summary["tau"] = float(tau)
+        summaries.append(summary)
+    return summaries
+
+
+def _iter_decoded_boxes(
+    model: torch.nn.Module,
+    loader: Iterable,
+    device: torch.device,
+    *,
+    ap_tau: float,
+    k: int,
+    top_k: int,
+    box_nms_iou: Optional[float],
+    output_stride: int,
+    size_parameterisation: str,
+    progress: bool,
+    desc: str,
+) -> Iterable[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Yield ``(boxes_xyxy, scores, gt_xyxy)`` per val image, one forward pass.
+
+    The decode is byte-for-byte the one :func:`evaluate_boxes` performs for its
+    AP detection list — same ``decode_boxes`` call, same clip to the unpadded
+    frame — so a sweep and a single ``evaluate_boxes`` at the same tau agree.
+    """
+    model.eval()
+    iterator = loader
+    if progress:
+        try:
+            total = len(loader)
+        except TypeError:  # pragma: no cover - loader without __len__
+            total = None
+        iterator = tqdm(loader, total=total, desc=desc, leave=False)
+
+    with torch.no_grad():
+        for batch in iterator:
+            image = batch["image"].to(device, non_blocking=True)
+            with autocast_context(device):
+                outputs = model(image)
+            outputs = {name: value.float() for name, value in outputs.items()}
+
+            prob = torch.sigmoid(outputs["heatmap"]).cpu()
+            wh, off = outputs["wh"].cpu(), outputs["off"].cpu()
+            width, height = int(batch["width"]), int(batch["height"])
+
+            boxes, scores = decode_boxes(
+                prob, wh, off, stride=output_stride, k=k, tau=ap_tau, top_k=top_k,
+                box_nms_iou=box_nms_iou, size_parameterisation=size_parameterisation,
+            )
+            yield (clip_boxes_xyxy(boxes, width, height), scores,
+                   boxes_xywh_to_xyxy(batch["boxes"]))
+
+
+def sweep_tau_boxes(
+    model: torch.nn.Module,
+    loader: Iterable,
+    device: torch.device,
+    taus: Sequence[float],
+    *,
+    ap_tau: float = 0.01,
+    k: int = 3,
+    top_k: int = 100,
+    box_nms_iou: Optional[float] = None,
+    match_iou: float = 0.5,
+    output_stride: int = 4,
+    size_parameterisation: str = "log",
+    progress: bool = False,
+    desc: str = "tau sweep",
+) -> List[Dict[str, float]]:
+    """Sweep the box decode threshold over the val set in one model pass.
+
+    The box analogue of :func:`cropcounter.metrics.sweep_tau`, and the
+    calibration step the reports call "tuning". Each image is forwarded **once**
+    and decoded **once** at ``ap_tau`` — exactly as :func:`evaluate_boxes`
+    decodes its AP list, including the clip to the unpadded frame — after which
+    every tau is a cheap ``scores > tau`` mask over that one decoded set, matched
+    at ``match_iou``. So the whole sweep costs one epoch of inference.
+
+    ``box_nms_iou`` is accepted so the same function serves the NMS comparison:
+    like :func:`evaluate_boxes`, suppression happens **inside** the decode,
+    before any thresholding, because NMS ranks by score and must see the full
+    candidate set.
+
+    Args:
+        taus: operating thresholds to score, e.g. ``np.arange(0.05, 0.8, 0.05)``.
+        ap_tau: the single decode threshold. Must sit below every tau swept,
+            or the sweep silently reports a truncated candidate set.
+        match_iou: IoU gate for the P/R/F1 match.
+        progress: show a per-image tqdm bar labelled ``desc``.
+
+    Returns:
+        One summary dict per tau, with a ``"tau"`` key added — the same keys as
+        :func:`evaluate_boxes` minus the COCO AP keys and ``val_loss``.
+
+    Note:
+        AP / AP50 / AP75 are deliberately not swept: they integrate over the
+        score axis and so are threshold-independent — sweeping tau cannot move
+        them. Only the operating-point metrics (P/R/F1, counts) respond.
+    """
+    return sweep_tau_from_detections(
+        _iter_decoded_boxes(
+            model, loader, device, ap_tau=ap_tau, k=k, top_k=top_k,
+            box_nms_iou=box_nms_iou, output_stride=output_stride,
+            size_parameterisation=size_parameterisation,
+            progress=progress, desc=desc,
+        ),
+        taus,
+        match_iou=match_iou,
+    )
