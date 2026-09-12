@@ -903,7 +903,10 @@ def plot_accuracy_vs_threshold(
     ax.set_title(title, fontsize=10)
     ax.set_ylim(0, 1)
     ax.grid(alpha=0.3)
-    ax.legend(fontsize=8, loc="lower center")
+    # "best" rather than a fixed corner: five curves plus the calibrated-tau annotations leave
+    # no corner reliably free, and a legend sitting on top of the curves is the one thing this
+    # figure cannot afford.
+    ax.legend(fontsize=8, loc="best")
     return _save(fig, out_path, dpi=120)
 
 
