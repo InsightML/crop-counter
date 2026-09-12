@@ -118,9 +118,12 @@ RUN_ARGS=(
 [ -n "$DRY_RUN" ] && RUN_ARGS+=("$DRY_RUN")
 
 if [ -n "$DRY_RUN" ]; then
-    # A successful dry run is reported as the DryRunOperation *error*, so the
-    # exit status is inverted here rather than treated as a failure.
-    if aws_ec2 "${RUN_ARGS[@]}" 2>&1 | tee /dev/stderr | grep -q 'DryRunOperation'; then
+    # A successful dry run is reported as the DryRunOperation *error* (non-zero
+    # exit), so capture the output first -- under pipefail a pipe would carry
+    # that exit status past a matching grep.
+    DRY_OUT="$(aws_ec2 "${RUN_ARGS[@]}" 2>&1 || true)"
+    echo "$DRY_OUT" >&2
+    if grep -q 'DryRunOperation' <<<"$DRY_OUT"; then
         echo "dry run OK — the caller has permission to launch this instance"
         exit 0
     fi
