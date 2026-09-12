@@ -319,6 +319,28 @@ def read_split(out: Path, split: str) -> dict:
     return json.loads((out / split / "annotations.json").read_text())
 
 
+def test_subset_renumbers_annotation_ids_as_ints(master, tmp_path):
+    """pycocotools stores annotation ids in a float array while matching, so a
+    source whose master ids are strings (the salmon-camera clips are) crashes
+    COCOeval unless the subset writer renumbers. The master id survives as
+    ``cfd_id``."""
+    doc = json.loads(json.dumps(master))
+    for ann in doc["annotations"]:
+        if str(ann["image_id"]).startswith("torsi"):
+            ann["id"] = f"{ann['image_id']}_{ann['id']}"
+    path = tmp_path / "master_str_ids.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    out = tmp_path / "ints"
+    cfd.run_subset(path, out, sources=["torsi", "brackish_dataset"], progress=False)
+    for split in ("train", "val"):
+        anns = read_split(out, split)["annotations"]
+        ids = [a["id"] for a in anns]
+        assert all(isinstance(i, int) for i in ids)
+        assert len(set(ids)) == len(ids)
+        assert any(isinstance(a["cfd_id"], str) for a in anns)   # the torsi originals
+        assert all("cfd_id" in a for a in anns)
+
+
 def test_subset_honours_is_train_and_never_resplits(master_json, tmp_path):
     out = tmp_path / "all"
     summary = run_subset(master_json, out, sources=["all"])

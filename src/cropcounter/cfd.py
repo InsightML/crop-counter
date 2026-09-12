@@ -931,10 +931,23 @@ def _coco_image(image: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def coco_document(images: Sequence[Dict[str, Any]], annotations: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    """Assemble a standard single-category COCO document."""
+    """Assemble a standard single-category COCO document.
+
+    Annotation ids are renumbered ``1..N``: pycocotools keeps them in a float
+    array while matching, so a source whose master ids are strings (the
+    salmon-camera clips) would crash ``COCOeval``. The master id survives as
+    ``cfd_id``. Image ids stay as CFD's strings -- COCOeval only ever uses
+    those as dict keys.
+    """
+    renumbered = []
+    for n, ann in enumerate(annotations, start=1):
+        record = dict(ann)
+        record["cfd_id"] = record.get("id")
+        record["id"] = n
+        renumbered.append(record)
     return {
         "images": [_coco_image(img) for img in images],
-        "annotations": list(annotations),
+        "annotations": renumbered,
         "categories": [dict(FISH_CATEGORY)],
         "info": {
             "description": "Community Fish Detection Dataset subset",
