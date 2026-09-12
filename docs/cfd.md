@@ -11,6 +11,7 @@ python -m cropcounter.cfd manifest --metadata cfd.json.zip --out reports/
 python -m cropcounter.cfd subset   --metadata cfd.json.zip --out data/brackish \
     --sources brackish_dataset --train-cap 20000 --val-cap 4000
 python -m cropcounter.cfd fetch    --subset data/brackish --max-side 1024
+python -m cropcounter.cfd points   --subset data/brackish --out data/brackish_points
 ```
 
 Every pass streams the master with `ijson` — the document is never loaded whole
@@ -126,6 +127,76 @@ locally:
 ```python
 from cropcounter.cfd import fetch_subset
 fetch_subset("data/brackish", max_side=1024, workers=32, mirror="gcs")
+```
+
+## `points`
+
+CFD is a **bbox** dataset; this package's head is a **point** head. `points`
+converts one into the other — box centres become COCO keypoints — so the native
+counter can train on a fetched subset:
+
+```bash
+python -m cropcounter.cfd points --subset data/brackish --out data/brackish_points
+```
+
+```
+<out>/
+├─ train/annotations.json          # COCO keypoints, int ids
+├─ train/images -> <subset>/train/images     # absolute symlink
+├─ val/ …
+├─ cfd_id_map.json                 # per split: original CFD id -> new int id
+└─ points_summary.json             # per split: n_images, n_points, n_empty, …
+```
+
+One annotation per box, `keypoints = [x + w/2, y + h/2, 2]` and
+`num_keypoints = 1`; `bbox` and `area` ride along untouched (harmless to the
+point loader, handy for later box work). `--category` names the keypoint
+category (default `fish`).
+
+**Why the ids are renumbered.** `crop_dataset.parse_coco_keypoints` does
+`int(image["id"])`, and CFD ids are *strings* — so the subset's own ids raise
+`ValueError` on load. Image and annotation ids therefore become consecutive
+1-based ints in file order. Nothing is lost: the original id stays on every
+image as `cfd_image_id` (and on every annotation as `cfd_annotation_id`), and
+`cfd_id_map.json` maps original → int per split. Every other CFD per-image field
+(`dataset`, `is_train`, `cfd_sequence`, `cfd_scale`, `cfd_file_name`,
+`original_data_source`) is carried through verbatim.
+
+**Why a separate data root**, never a sibling file in `data/brackish/`:
+`crop_dataset.resolve_annotations` looks for `annotations.json` *first*, so a
+points document written beside the bbox one could never be the file the loader
+opens. The points root is a real root with its own `annotations.json`; its
+`images/` is a symlink back to the subset, so the pixels are not duplicated
+(`--copy-images` makes real copies instead — for a Drive or zip hand-off, where
+symlinks do not travel).
+
+**Empty frames are kept** by default, as image records with no annotation. That
+is what standard COCO means by "nothing here", and they are the negatives the
+heatmap head needs — a Brackish subset with the empties removed teaches the
+model that every frame contains a fish. `--drop-empty` removes them, for a
+crowd-only ablation; `points_summary.json` reports `n_empty` and
+`dropped_empty` either way.
+
+A subset that has not been through `fetch` is **refused** (`ValueError`): its
+images carry no `cfd_scale`, so the geometry is still in published pixels and
+`file_name` still carries the master's `JPEGImages/` prefix — the points would
+not match any file on disk, and there would be no file on disk to match.
+
+Two traps on the training side, neither of which this command can fix for you:
+
+- `TrainConfig.labels` defaults to `("Wheat", "Volunteer")`, so the config must
+  set `"labels": ["fish"]` (or the category you passed) or every point is
+  silently filtered out and you train on an empty dataset.
+- `"augment_profile": "natural"` — underwater footage has an up, so
+  `VerticalFlip` and `RandomRotate90` do not belong.
+
+It is also a library call:
+
+```python
+from cropcounter.cfd import bbox_centres_to_keypoints, write_points_root
+
+write_points_root("data/brackish", "data/brackish_points")
+points_doc, id_map = bbox_centres_to_keypoints(bbox_doc)   # in memory
 ```
 
 ## Cost of a real run
