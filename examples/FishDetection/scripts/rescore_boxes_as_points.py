@@ -198,6 +198,9 @@ def main(argv: List[str] | None = None) -> int:
     ap.add_argument("--conf-thr", type=float, default=0.0,
                     help="the single threshold scored when --sweep is not given")
     ap.add_argument("--out", required=True, type=Path, help="where to write the results JSON")
+    ap.add_argument("--no-rows", action="store_true",
+                    help="omit the per-image rows (keeps the committed copy small; the full "
+                         "file lives on Drive)")
     args = ap.parse_args(argv)
 
     thresholds = parse_thresholds(args.thresholds) if args.sweep else [round(args.conf_thr, 6)]
@@ -249,7 +252,7 @@ def main(argv: List[str] | None = None) -> int:
             "best_f1": best_f1,
             "best_count_mae": best_mae,
             "sweep": sweep,
-            "rows": rows,
+            "rows": [] if args.no_rows else rows,
         })
 
     print("\nbest F1 operating point")
