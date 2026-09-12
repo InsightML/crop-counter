@@ -83,3 +83,6 @@ Thumbs.db
 
 # SDD process notes (build logs, review diffs) -- never shipped.
 /.superpowers/
+
+# EC2 instance id written by examples/FishDetection/scripts/aws/launch.sh.
+.aws-instance-id
