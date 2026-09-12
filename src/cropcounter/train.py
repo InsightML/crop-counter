@@ -837,17 +837,18 @@ def train(cfg: TrainConfig) -> Tuple[CropCounter, Dict[str, List[float]], str, i
         del resume    # an unfrozen run's optimizer state is hundreds of MB
 
     for epoch in range(start_epoch, cfg.epochs + 1):
-        # Reseed per epoch so a resumed run's draws depend only on
+        # Reseed from epoch 2 on, so a resumed run's draws depend only on
         # (cfg.seed, epoch), not on how many epochs preceded them in THIS
-        # process. Two caveats, both deliberate. The epoch-1 call is
-        # seed_everything(cfg.seed) again, but the model init above has
-        # consumed the global RNG since the call at the top of train(), so the
-        # epoch-1 shuffle is not the one a pre-resume version of this trainer
-        # drew — weights are unaffected, tile ORDER is. And with
-        # persistent_workers the loader seed is drawn once per loader
-        # lifetime, so a resumed run is reproducible from its own start rather
-        # than bit-identical to the run it replaces.
-        seed_everything(cfg.seed + epoch - 1)
+        # process. Epoch 1 is deliberately NOT reseeded: the model init above
+        # has consumed the global RNG since the call at the top of train(), so
+        # reseeding here would change the epoch-1 tile order that every run
+        # before resume existed drew. Resume never starts at epoch 1, so it
+        # loses nothing. Caveat, deliberate: with persistent_workers the
+        # loader seed is drawn once per loader lifetime, so a resumed run is
+        # reproducible from its own start rather than bit-identical to the
+        # run it replaces.
+        if epoch > 1:
+            seed_everything(cfg.seed + epoch - 1)
         model.train()
         epoch_loss, n_batches, epoch_pos = 0.0, 0, 0
         pbar = tqdm(train_loader, desc=f"epoch {epoch}/{cfg.epochs}", leave=False)
@@ -995,7 +996,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     """CLI: ``python -m cropcounter.train --config config.json``."""
     parser = argparse.ArgumentParser(
         prog="python -m cropcounter.train",
-        description="Train the pyramid decoder on top of a frozen DINOv3 backbone.",
+        description="Train the pyramid decoder on a DINOv3 backbone (frozen by default; "
+                    "--backbone-trainable or backbone_trainable in the config fine-tunes it).",
     )
     parser.add_argument("--config", type=Path, default=None,
                         help="JSON TrainConfig; omit to train with the defaults")
