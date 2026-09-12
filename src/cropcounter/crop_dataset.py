@@ -382,7 +382,8 @@ class CropTileDataset(Dataset):
 
     Pass ``transform`` to replace the default training augmentation pipeline;
     it must be an albumentations Compose with ``KeypointParams(format="xy")``
-    and end in ``Normalize`` + ``ToTensorV2``.
+    and end in ``Normalize`` + ``ToTensorV2``. ``augment_profile`` instead tunes
+    that default — see :meth:`default_transform`.
     """
 
     def __init__(
@@ -397,6 +398,7 @@ class CropTileDataset(Dataset):
         scale_jitter: float = 0.25,
         exclude_label_statuses: Sequence[str] = (),
         transform: Optional[A.Compose] = None,
+        augment_profile: str = "wheat",
     ) -> None:
         self.records = list(records)
         self.images_dir = Path(images_dir)
@@ -416,13 +418,28 @@ class CropTileDataset(Dataset):
         ]
 
         if train:
-            self.transform = transform or self.default_transform(tile, scale_jitter)
+            self.transform = transform or self.default_transform(
+                tile, scale_jitter, profile=augment_profile
+            )
         else:
             self.transform = None
 
     @staticmethod
-    def default_transform(tile: int = 768, scale_jitter: float = 0.25) -> A.Compose:
-        """The default training augmentation pipeline."""
+    def default_transform(
+        tile: int = 768, scale_jitter: float = 0.25, profile: str = "wheat",
+    ) -> A.Compose:
+        """The default training augmentation pipeline.
+
+        ``profile="wheat"`` is the nadir crop-photo recipe, where every flip and
+        90-degree rotation is label-preserving. ``"natural"`` drops
+        ``VerticalFlip`` and ``RandomRotate90`` and keeps the rest: natural
+        scenes (underwater footage, ground-level photography) have an up.
+        """
+        if profile not in ("wheat", "natural"):
+            raise ValueError(
+                f"unknown augment_profile {profile!r}; valid: 'wheat', 'natural'"
+            )
+        upright = profile == "natural"
         return A.Compose(
             [
                 A.RandomScale(scale_limit=scale_jitter, p=0.8),
@@ -431,8 +448,7 @@ class CropTileDataset(Dataset):
                     border_mode=cv2.BORDER_CONSTANT, fill=0,
                 ),
                 A.HorizontalFlip(p=0.5),
-                A.VerticalFlip(p=0.5),
-                A.RandomRotate90(p=0.75),
+                *([] if upright else [A.VerticalFlip(p=0.5), A.RandomRotate90(p=0.75)]),
                 A.RandomBrightnessContrast(
                     brightness_limit=0.2, contrast_limit=0.2, p=0.5
                 ),

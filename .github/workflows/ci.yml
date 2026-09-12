@@ -20,9 +20,10 @@ jobs:
       # Default PyPI index (CPU-only execution either way on this runner — no
       # GPU here, and the backbone weights are a separate gated download this
       # job never touches). [dev] for pytest/ruff, [portal] so tests/test_portal.py
-      # can import `requests`/`python-dotenv` at collection time.
+      # can import `requests`/`python-dotenv` at collection time. [cfd] so
+      # tests/test_cfd.py can import `ijson`.
       - name: Install package
-        run: pip install -e ".[dev,portal]"
+        run: pip install -e ".[dev,portal,cfd]"
 
       - name: Lint (ruff)
         run: ruff check .
