@@ -135,7 +135,7 @@ stage() {
         return 0
     fi
     echo "   uploading $key ($size bytes)"
-    aws s3 cp --region "$REGION" "$local_path" "s3://$BUCKET/$key"
+    aws s3 cp --region "$REGION" "$local_path" "s3://$BUCKET/$key" --only-show-errors
 }
 stage "$REPO/weights/dinov3_convnext_base_pretrain_lvd1689m-801f2ba9.pth"
 stage "$REPO/weights/decoder_best.pt"
