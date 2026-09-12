@@ -1125,12 +1125,17 @@ def rescale_annotations(document: Dict[str, Any], scales: Dict[Any, Tuple[int, i
     ``cfd_scale`` field and its ``file_name`` becomes the on-disk basename (the
     master path is kept as ``cfd_file_name``); every bbox and area is multiplied
     by the same factor.
-    Images absent from ``scales`` (download failed) keep their native geometry
-    and ``cfd_scale`` 1.0.
+    Images absent from ``scales`` (download failed, or the file is missing from
+    every mirror -- a handful of coralscapes PNGs are) are LEFT OUT, with their
+    annotations: ``annotations.json`` describes what is on disk, and the
+    training loader raises on a listed image it cannot open. The native
+    document keeps them, so a later fetch retries and re-admits them.
     """
     out = dict(document)
     images = []
     for image in document.get("images", []):
+        if image.get("id") not in scales:
+            continue
         record = dict(image)
         width, height, scale = scales.get(
             image.get("id"), (image.get("width"), image.get("height"), 1.0)
@@ -1148,8 +1153,10 @@ def rescale_annotations(document: Dict[str, Any], scales: Dict[Any, Tuple[int, i
 
     annotations = []
     for ann in document.get("annotations", []):
+        if ann.get("image_id") not in by_id:
+            continue
         record = dict(ann)
-        scale = by_id.get(ann.get("image_id"), 1.0)
+        scale = by_id[ann["image_id"]]
         if scale != 1.0:
             record["bbox"] = [round(float(v) * scale, 2) for v in ann["bbox"][:4]]
             record["area"] = round(record["bbox"][2] * record["bbox"][3], 2)
@@ -1261,7 +1268,7 @@ def fetch_subset(
         print(
             f"{split}: {counts['images']:,} images "
             f"({counts['downloaded']:,} downloaded, {counts['skipped']:,} already present, "
-            f"{counts['failed']:,} failed)"
+            f"{counts['failed']:,} failed -> left out of annotations.json)"
         )
     print(
         f"total: {sum(c['images'] for c in per_split.values()):,} images, "
