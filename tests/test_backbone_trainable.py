@@ -11,6 +11,9 @@ DINOv3 checkpoint, no torch.hub fetch and no dataset are involved.
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -20,6 +23,7 @@ from cropcounter.dinov3_pyramid import (
     convnext_param_depth,
 )
 from cropcounter.losses import penalty_reduced_focal_loss
+from cropcounter.train import SELECTION, TrainConfig, build_param_groups
 
 #: One 64x64 RGB tile is enough: stride 32 still leaves a 2x2 map to fuse.
 TILE = 64
@@ -174,3 +178,75 @@ def test_convnext_param_depth_rejects_an_unknown_layout(name):
     """A hub layout change must fail loudly, not land in the wrong LR bucket."""
     with pytest.raises(KeyError):
         convnext_param_depth(name)
+
+
+# --- 1, 2: the config fields ------------------------------------------------
+
+def test_new_config_fields_default_to_todays_behaviour():
+    """A default config is exactly the frozen, val-loss-selected run we ship."""
+    cfg = TrainConfig()
+    assert cfg.backbone_trainable is False
+    assert cfg.backbone_lr == 2e-5
+    assert cfg.backbone_layer_decay == 0.8
+    assert cfg.backbone_weight_decay == 0.05
+    assert cfg.select_on == "val_loss"
+    assert cfg.resume_from is None
+
+
+def test_resume_from_round_trips_as_a_path():
+    """JSON stores the path as a string; from_dict must coerce it back to Path."""
+    as_dict = TrainConfig(resume_from=Path("runs/cfd17/last.pt")).to_dict()
+    assert as_dict["resume_from"] == "runs/cfd17/last.pt"
+
+    restored = TrainConfig.from_dict(as_dict)
+    assert restored.resume_from == Path("runs/cfd17/last.pt")
+    assert isinstance(restored.resume_from, Path)
+
+
+def test_shipped_configs_load_strictly_and_keep_the_defaults():
+    """No shipped config silently changed behaviour when these fields landed.
+
+    A config that names the new keys is an unfrozen/selection experiment and
+    is allowed its own values; one that does not must come back at the
+    frozen, val-loss defaults.
+    """
+    root = Path(__file__).resolve().parents[1]
+    configs = sorted(root.glob("examples/*/*.json"))
+    assert configs, "no example configs found"
+
+    for path in configs:
+        raw = TrainConfig.from_json(path, strict=True)
+        assert raw.select_on in SELECTION, path
+        assert isinstance(raw.backbone_trainable, bool), path
+        with path.open(encoding="utf-8") as fh:
+            keys = set(json.load(fh))
+        if "backbone_trainable" not in keys:
+            assert raw.backbone_trainable is False, path
+        if "select_on" not in keys:
+            assert raw.select_on == "val_loss", path
+
+
+# --- 11: the optimizer's view of a frozen run -------------------------------
+
+def test_frozen_build_param_groups_is_one_group_of_trainable_parameters(stub_backbone):
+    """The frozen default hands AdamW exactly what it handed it before."""
+    model = _model(trainable=False)
+    groups = build_param_groups(model, TrainConfig())
+
+    assert len(groups) == 1
+    assert groups[0]["name"] == "decoder"
+    assert [id(p) for p in groups[0]["params"]] == [
+        id(p) for p in model.trainable_parameters()
+    ]
+
+
+def test_trainable_build_param_groups_adds_the_backbone_ladder(stub_backbone):
+    """Unfrozen: one decoder group at cfg.lr, then the trunk's ten."""
+    model = _model(trainable=True)
+    cfg = TrainConfig(backbone_trainable=True, lr=1e-3, backbone_lr=2e-5)
+    groups = build_param_groups(model, cfg)
+
+    assert len(groups) == 1 + 2 * BACKBONE_DEPTHS
+    assert groups[0]["lr"] == 1e-3
+    assert groups[-1]["lr"] == pytest.approx(2e-5)
+    torch.optim.AdamW(groups, lr=cfg.lr, weight_decay=cfg.weight_decay)

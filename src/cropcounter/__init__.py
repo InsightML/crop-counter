@@ -68,6 +68,7 @@ _LAZY_ATTRS = {
     "TrainConfig": "train",
     "build_loaders": "train",
     "build_model": "train",
+    "load_backbone_from": "train",
     "load_checkpoint": "train",
     "resolve_device": "train",
     "train": "train",
@@ -125,8 +126,8 @@ __all__ = [
     "summarise_boxes", "write_coco_results", "read_coco_results",
     "sweep_tau_boxes", "sweep_tau_from_detections",
     # training
-    "TrainConfig", "build_loaders", "build_model", "load_checkpoint",
-    "resolve_device", "train",
+    "TrainConfig", "build_loaders", "build_model", "load_backbone_from",
+    "load_checkpoint", "resolve_device", "train",
     # data
     "COUNTED_LABELS", "ImageRecord", "Point", "Box", "CropTileDataset", "collate_val",
     "load_records", "load_splits",

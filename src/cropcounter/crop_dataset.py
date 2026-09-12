@@ -662,9 +662,12 @@ class CropTileDataset(Dataset):
         """Pick the record a box training tile is cut from.
 
         Returns ``(record_index, expect_boxes)``. Randomness comes from torch's
-        generator, which the DataLoader seeds per worker per epoch — so the
-        sequence is reproducible from ``cfg.seed`` and still differs between
-        workers.
+        generator, which the DataLoader seeds once per worker — at worker
+        START, not per epoch. With ``persistent_workers=True`` the workers
+        outlive the epoch, so that seed is drawn once for the whole run: the
+        sequence is reproducible from ``cfg.seed`` for an uninterrupted run and
+        differs between workers, but a resumed run picks up a fresh worker
+        seed rather than the one the killed run would have continued with.
         """
         if not self.records:
             raise IndexError("CropTileDataset has no records")

@@ -42,7 +42,7 @@ from .losses import masked_l1_loss, penalty_reduced_focal_loss
 from .metrics import evaluate
 
 #: TrainConfig fields that are paths on the dataclass but strings in JSON.
-_PATH_FIELDS = ("data_root", "weights_dir", "out_dir", "init_decoder_from")
+_PATH_FIELDS = ("data_root", "weights_dir", "out_dir", "init_decoder_from", "resume_from")
 #: TrainConfig fields that must be tuples, not the lists JSON round-trips to.
 _TUPLE_FIELDS = ("exclude_label_statuses", "labels")
 
@@ -66,6 +66,18 @@ class TrainConfig:
 
     # Model
     backbone: str = "base"
+    #: Unfreeze the whole DINOv3 trunk and fine-tune it alongside the decoder.
+    #: ``False`` — the default everywhere — is the shipped frozen-feature run.
+    backbone_trainable: bool = False
+    #: Learning rate for the TOP backbone stage. Two orders of magnitude below
+    #: ``lr``: the decoder is random and the trunk is pretrained.
+    backbone_lr: float = 2e-5
+    #: Layer-wise decay: each depth down from the top runs at this fraction of
+    #: the one above, so the stem moves at ``backbone_layer_decay ** 4``.
+    backbone_layer_decay: float = 0.8
+    #: Weight decay for the trunk's multi-dimensional tensors. 1-D ones (norm
+    #: weights, biases, LayerScale gammas) are never decayed.
+    backbone_weight_decay: float = 0.05
     c_dec: int = 192
     output_stride: int = 4
 
@@ -136,6 +148,14 @@ class TrainConfig:
     #: stays at its init. Without this, ``freeze_fusion`` would freeze a
     #: RANDOM trunk and the "linear probe" would measure nothing.
     init_decoder_from: Optional[Path] = None
+    #: Which validation metric writes ``best.pt``: ``"val_loss"`` (minimised,
+    #: the default and the historical behaviour), ``"ap50"`` (box only) or
+    #: ``"f1"``. See :func:`selection_key`.
+    select_on: str = "val_loss"
+    #: A ``last.pt`` to pick a killed run back up from. Restores the weights,
+    #: optimizer, scheduler, scaler and history, and continues from the epoch
+    #: after the one saved.
+    resume_from: Optional[Path] = None
 
     # Runtime
     #: torch device string ("cuda", "mps", "cpu"); None auto-detects — see
@@ -394,12 +414,66 @@ def build_model(cfg: TrainConfig, device: torch.device) -> CropCounter:
     model = CropCounter(
         backbone_size=cfg.backbone, weights_dir=cfg.weights_dir,
         c_dec=cfg.c_dec, output_stride=cfg.output_stride, task=cfg.task,
+        backbone_trainable=cfg.backbone_trainable,
     )
     if cfg.init_decoder_from is not None:
         init_decoder_from_checkpoint(model.decoder, Path(cfg.init_decoder_from))
     if cfg.freeze_fusion:
         model.decoder.freeze_fusion()
     return model.to(device)
+
+
+def build_param_groups(model: CropCounter, cfg: TrainConfig) -> List[Dict[str, Any]]:
+    """The optimizer's parameter groups for this run.
+
+    Frozen (the default): one group holding exactly what
+    ``model.trainable_parameters()`` returns, at ``cfg.lr`` and
+    ``cfg.weight_decay`` — i.e. the single group the trainer always used.
+    Unfrozen: that same decoder group, followed by the trunk's layer-wise
+    ladder from :meth:`DinoV3Backbone.param_groups`, so the decoder keeps its
+    own learning rate while the backbone gets a much smaller, depth-decayed
+    one. Every group carries a ``"name"`` for the epoch log.
+    """
+    if not cfg.backbone_trainable:
+        # With the trunk frozen these ARE the model's trainable parameters.
+        decoder_params = [p for p in model.parameters() if p.requires_grad]
+    else:
+        decoder_params = [p for p in model.decoder.parameters() if p.requires_grad]
+
+    groups: List[Dict[str, Any]] = [{
+        "params": decoder_params, "lr": cfg.lr,
+        "weight_decay": cfg.weight_decay, "name": "decoder",
+    }]
+    if cfg.backbone_trainable:
+        groups.extend(model.backbone.param_groups(
+            cfg.backbone_lr, cfg.backbone_layer_decay, cfg.backbone_weight_decay
+        ))
+    return groups
+
+
+def build_optimizer_and_scheduler(
+    model: CropCounter, cfg: TrainConfig
+) -> Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
+    """AdamW + linear warmup into cosine decay, exactly as the loop uses them.
+
+    Factored out of :func:`train` so a resume rebuilds byte-identical objects
+    to load state into. ``SequentialLR`` scales every parameter group from its
+    own ``initial_lr``, so the backbone ladder warms up and anneals in
+    proportion rather than being flattened onto the decoder's rate.
+    """
+    optimizer = torch.optim.AdamW(
+        build_param_groups(model, cfg), lr=cfg.lr, weight_decay=cfg.weight_decay
+    )
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=0.1, total_iters=max(cfg.warmup_epochs, 1)
+    )
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(cfg.epochs - cfg.warmup_epochs, 1)
+    )
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer, [warmup, cosine], milestones=[max(cfg.warmup_epochs, 1)]
+    )
+    return optimizer, scheduler
 
 
 def _batch_loss(
@@ -466,6 +540,44 @@ HISTORY_KEYS: Dict[str, Dict[str, str]] = {
 }
 
 
+#: ``cfg.select_on`` -> (the summary key to read, +1 if bigger is better).
+#: ``val_loss`` is the historical default; the detection metrics are the ones
+#: a box run is actually judged on, and they often peak well after the loss
+#: bottoms out.
+SELECTION: Dict[str, Tuple[str, int]] = {
+    "val_loss": ("val_loss", -1),
+    "ap50": ("ap50", +1),
+    "f1": ("f1", +1),
+}
+
+
+def selection_key(select_on: str, task: str) -> Tuple[str, int]:
+    """Resolve ``cfg.select_on`` to the (summary key, direction) ``best.pt`` uses.
+
+    The direction is ``+1`` when a bigger number is better and ``-1`` when a
+    smaller one is, which collapses the loop's comparison to a single
+    ``sign * value > sign * best``. Raises ``ValueError`` for an unknown name,
+    or for a metric this task never computes — ``ap50`` on the point task,
+    say. Call it before the data loads so a config typo fails in a second
+    rather than an epoch.
+    """
+    if select_on not in SELECTION:
+        raise ValueError(
+            f"select_on must be one of {sorted(SELECTION)}, got {select_on!r}"
+        )
+    key, sign = SELECTION[select_on]
+    if key not in set(HISTORY_KEYS[task].values()):
+        raise ValueError(
+            f"select_on={select_on!r} is not available for the {task!r} task"
+        )
+    return key, sign
+
+
+def _is_better(value: float, best: float, sign: int) -> bool:
+    """Did ``value`` improve on ``best``, in the direction ``sign`` points?"""
+    return sign * value > sign * best
+
+
 def _append_history(
     history: Dict[str, List[float]],
     task: str,
@@ -488,16 +600,70 @@ def _append_history(
             )
 
 
-def _save_checkpoint(model: CropCounter, cfg: TrainConfig, path: Path) -> None:
-    torch.save({"decoder": model.decoder.state_dict(), "config": cfg.to_dict()}, path)
+def _save_checkpoint(
+    model: CropCounter,
+    cfg: TrainConfig,
+    path: Path,
+    *,
+    epoch: int,
+    history: Dict[str, List[float]],
+    best_metric: float,
+    best_epoch: int,
+    resume_state: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Write one checkpoint.
+
+    Always carries the decoder and the config, so every existing reader keeps
+    working, plus the run bookkeeping a resume needs. Two things are
+    conditional. The fine-tuned trunk is saved only when the run is actually
+    training it (an 87 M-parameter tensor set nobody wants in a frozen run's
+    checkpoint). ``resume_state`` — optimizer, scheduler and scaler — is saved
+    only when passed, which the loop does for ``last.pt`` alone: AdamW's two
+    moments over an unfrozen trunk are about 700 MB, and ``best.pt`` is
+    rewritten far more often than it is resumed from.
+    """
+    payload: Dict[str, Any] = {
+        "decoder": model.decoder.state_dict(),
+        "config": cfg.to_dict(),
+        "epoch": epoch,
+        "history": history,
+        "best_metric": best_metric,
+        "best_epoch": best_epoch,
+    }
+    if cfg.backbone_trainable:
+        payload["backbone"] = model.backbone.model.state_dict()
+    if resume_state is not None:
+        payload["resume_state"] = resume_state
+    torch.save(payload, path)
+
+
+def load_backbone_from(model: CropCounter, path: Path) -> None:
+    """Put a fine-tuned trunk from another checkpoint under ``model``'s decoder.
+
+    This is the catastrophic-forgetting seam: take the backbone an unfrozen
+    run produced, drop it under a decoder trained on a different dataset, and
+    measure what that decoder has lost. The load is strict, so a trunk of a
+    different size fails here rather than silently half-loading.
+
+    Args:
+        model: modified in place; must have been built at the same backbone size.
+        path: a checkpoint written by an unfrozen run.
+    """
+    payload = torch.load(Path(path), map_location="cpu", weights_only=False)
+    if "backbone" not in payload:
+        raise KeyError(
+            f"{path} carries no 'backbone' state dict — was that run frozen?"
+        )
+    model.backbone.model.load_state_dict(payload["backbone"])
 
 
 def load_checkpoint(
     path: Path,
     device: torch.device,
     weights_dir: Optional[Path] = None,
+    backbone_from: Optional[Path] = None,
 ) -> Tuple[CropCounter, TrainConfig]:
-    """Rebuild a CropCounter from a saved decoder checkpoint.
+    """Rebuild a CropCounter from a saved checkpoint.
 
     Args:
         path: a ``best.pt`` / ``last.pt`` written by :func:`train`.
@@ -506,22 +672,39 @@ def load_checkpoint(
             checkpoint. The stored value is relative to wherever training ran,
             so loading from a different working directory needs this (or
             ``$CROPCOUNTER_WEIGHTS_DIR``, or a ``weights/`` folder in the cwd).
+        backbone_from: a second checkpoint whose fine-tuned trunk is loaded
+            under this one's decoder — the forgetting experiment. The returned
+            model reports its backbone as trainable; it is meant for eval.
 
     Returns:
-        ``(model, config)``. The model is on ``device``, decoder weights loaded;
-        call ``.eval()`` before inference.
+        ``(model, config)``. The model is on ``device``, weights loaded; call
+        ``.eval()`` before inference.
     """
     payload = torch.load(path, map_location="cpu", weights_only=False)
     cfg = TrainConfig.from_dict(dict(payload["config"]))
     if weights_dir is not None:
         cfg.weights_dir = Path(weights_dir)
+    if "backbone" in payload and not cfg.backbone_trainable:
+        raise ValueError(
+            f"{path} carries a 'backbone' state dict but its config says "
+            "backbone_trainable=False; that checkpoint is inconsistent"
+        )
     # ``init_decoder_from`` is a *training* setting: this checkpoint's own
-    # weights are loaded strictly on the next line, so re-seeding from the run's
-    # init checkpoint would be wasted work -- and a hard failure whenever that
-    # file is not sitting where it was at training time. The returned config
-    # keeps the field, for provenance; only the build ignores it.
-    model = build_model(replace(cfg, init_decoder_from=None), device)
+    # weights are loaded strictly below, so re-seeding from the run's init
+    # checkpoint would be wasted work -- and a hard failure whenever that file
+    # is not sitting where it was at training time. The returned config keeps
+    # the field, for provenance; only the build ignores it.
+    build_cfg = replace(cfg, init_decoder_from=None)
+    if backbone_from is not None:
+        # Build trainable so ``requires_grad`` honestly reflects a trunk that
+        # did train, even though this model is for evaluation.
+        build_cfg = replace(build_cfg, backbone_trainable=True)
+    model = build_model(build_cfg, device)
+    if "backbone" in payload:
+        model.backbone.model.load_state_dict(payload["backbone"])
     model.decoder.load_state_dict(payload["decoder"])
+    if backbone_from is not None:
+        load_backbone_from(model, backbone_from)
     return model, cfg
 
 
@@ -579,8 +762,21 @@ def train(cfg: TrainConfig) -> Tuple[CropCounter, Dict[str, List[float]], str, i
     Checkpoints and curves land in ``cfg.out_dir / run_name``."""
     device = resolve_device(cfg.device)
     seed_everything(cfg.seed)
+    # Resolved before anything expensive, so a bad select_on fails in a second.
+    metric_key, metric_sign = selection_key(cfg.select_on, cfg.task)
 
-    run_name = cfg.run_name or time.strftime("%Y%m%d_%H%M%S")
+    resume: Optional[Dict[str, Any]] = None
+    if cfg.resume_from is not None:
+        resume_path = Path(cfg.resume_from)
+        resume = torch.load(resume_path, map_location=device, weights_only=False)
+        print(f"resuming from {resume_path} at epoch {resume['epoch'] + 1}")
+
+    # A relaunch lands back in the run directory it was killed in.
+    default_name = (
+        Path(cfg.resume_from).parent.name if resume is not None
+        else time.strftime("%Y%m%d_%H%M%S")
+    )
+    run_name = cfg.run_name or default_name
     run_dir = Path(cfg.out_dir) / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     cfg.to_json(run_dir / "config.json")
@@ -598,35 +794,60 @@ def train(cfg: TrainConfig) -> Tuple[CropCounter, Dict[str, List[float]], str, i
               f"sampling {cfg.negative_tile_fraction:.0%} negative tiles "
               f"| val annotations {val_annotations}")
 
-    model = build_model(cfg, device)
-    n_trainable = sum(p.numel() for p in model.trainable_parameters())
+    # A resume loads this checkpoint's own weights below, so re-seeding the
+    # decoder from the run's init checkpoint would only overwrite them.
+    model = build_model(
+        replace(cfg, init_decoder_from=None) if resume is not None else cfg, device
+    )
+    if resume is not None:
+        if "backbone" in resume:
+            model.backbone.model.load_state_dict(resume["backbone"])
+        model.decoder.load_state_dict(resume["decoder"])
+
+    n_decoder = sum(p.numel() for p in model.decoder.parameters() if p.requires_grad)
+    n_backbone = sum(p.numel() for p in model.backbone.parameters() if p.requires_grad)
     frozen_note = " (fusion trunk frozen)" if cfg.freeze_fusion else ""
     dtype = amp_dtype(device)
     amp_note = str(dtype).removeprefix("torch.") if dtype is not None else "off (fp32)"
-    print(f"backbone {cfg.backbone} frozen; decoder params: {n_trainable / 1e6:.2f}M"
-          f"{frozen_note} | device {device} | autocast {amp_note}")
+    print(f"backbone {cfg.backbone} "
+          f"{'trainable' if cfg.backbone_trainable else 'frozen'}: "
+          f"{n_backbone / 1e6:.2f}M | decoder params: {n_decoder / 1e6:.2f}M"
+          f"{frozen_note} | select on {cfg.select_on} "
+          f"| device {device} | autocast {amp_note}")
 
-    optimizer = torch.optim.AdamW(
-        model.trainable_parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
-    )
-    warmup = torch.optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=0.1, total_iters=max(cfg.warmup_epochs, 1)
-    )
-    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=max(cfg.epochs - cfg.warmup_epochs, 1)
-    )
-    scheduler = torch.optim.lr_scheduler.SequentialLR(
-        optimizer, [warmup, cosine], milestones=[max(cfg.warmup_epochs, 1)]
-    )
+    optimizer, scheduler = build_optimizer_and_scheduler(model, cfg)
 
     # fp16 (pre-Ampere CUDA) underflows gradients without loss scaling; bf16 has
     # fp32's exponent range and needs none, so it keeps the unscaled path.
     scaler = torch.amp.GradScaler("cuda") if dtype is torch.float16 else None
     history: Dict[str, List[float]] = {key: [] for key in HISTORY_KEYS[cfg.task]}
-    best_val_loss = float("inf")
+    # -inf when bigger is better, +inf when smaller is: the first epoch always wins.
+    best_metric = float("inf") * -metric_sign
     best_epoch = 0
+    start_epoch = 1
 
-    for epoch in range(1, cfg.epochs + 1):
+    if resume is not None:
+        optimizer.load_state_dict(resume["resume_state"]["optimizer"])
+        scheduler.load_state_dict(resume["resume_state"]["scheduler"])
+        if scaler is not None and resume["resume_state"]["scaler"] is not None:
+            scaler.load_state_dict(resume["resume_state"]["scaler"])
+        history = resume["history"]
+        best_metric, best_epoch = resume["best_metric"], resume["best_epoch"]
+        start_epoch = resume["epoch"] + 1
+        del resume    # an unfrozen run's optimizer state is hundreds of MB
+
+    for epoch in range(start_epoch, cfg.epochs + 1):
+        # Reseed per epoch so a resumed run's draws depend only on
+        # (cfg.seed, epoch), not on how many epochs preceded them in THIS
+        # process. Two caveats, both deliberate. The epoch-1 call is
+        # seed_everything(cfg.seed) again, but the model init above has
+        # consumed the global RNG since the call at the top of train(), so the
+        # epoch-1 shuffle is not the one a pre-resume version of this trainer
+        # drew — weights are unaffected, tile ORDER is. And with
+        # persistent_workers the loader seed is drawn once per loader
+        # lifetime, so a resumed run is reproducible from its own start rather
+        # than bit-identical to the run it replaces.
+        seed_everything(cfg.seed + epoch - 1)
         model.train()
         epoch_loss, n_batches, epoch_pos = 0.0, 0, 0
         pbar = tqdm(train_loader, desc=f"epoch {epoch}/{cfg.epochs}", leave=False)
@@ -666,12 +887,23 @@ def train(cfg: TrainConfig) -> Tuple[CropCounter, Dict[str, List[float]], str, i
         train_loss = epoch_loss / max(n_batches, 1)
 
         lr_now = optimizer.param_groups[0]["lr"]
+        # The trunk's top stage: the fastest backbone group, and the one worth
+        # watching. The ladder below it scales with this.
+        backbone_note = (f" bb-lr {optimizer.param_groups[-1]['lr']:.2e}"
+                         if cfg.backbone_trainable else "")
+        resume_state = {
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "scaler": None if scaler is None else scaler.state_dict(),
+        }
 
         if not should_validate(epoch, cfg.epochs, cfg.val_freq):
             _append_history(history, cfg.task, train_loss, lr_now)
-            _save_checkpoint(model, cfg, run_dir / "last.pt")
+            _save_checkpoint(model, cfg, run_dir / "last.pt", epoch=epoch,
+                             history=history, best_metric=best_metric,
+                             best_epoch=best_epoch, resume_state=resume_state)
             print(f"epoch {epoch:3d} | loss {train_loss:.4f} | val — | "
-                  f"lr {lr_now:.2e}")
+                  f"lr {lr_now:.2e}{backbone_note}")
         else:
             detections: List[Dict[str, Any]] = []
             if cfg.task == "box":
@@ -696,14 +928,22 @@ def train(cfg: TrainConfig) -> Tuple[CropCounter, Dict[str, List[float]], str, i
             _append_history(history, cfg.task, train_loss, lr_now, summary)
 
             marker = ""
-            if summary["val_loss"] < best_val_loss:
-                best_val_loss = summary["val_loss"]
+            if _is_better(summary[metric_key], best_metric, metric_sign):
+                best_metric = summary[metric_key]
                 best_epoch = epoch
-                _save_checkpoint(model, cfg, run_dir / "best.pt")
+                # No resume_state on best.pt: it is rewritten far more often
+                # than it is resumed from, and the moments dwarf the weights.
+                _save_checkpoint(model, cfg, run_dir / "best.pt", epoch=epoch,
+                                 history=history, best_metric=best_metric,
+                                 best_epoch=best_epoch)
                 if cfg.task == "box":
                     write_coco_results(detections, run_dir / "predictions.json")
                 marker = "  <- best"
-            _save_checkpoint(model, cfg, run_dir / "last.pt")
+            if cfg.task == "box" and epoch == cfg.epochs:
+                write_coco_results(detections, run_dir / "predictions_last.json")
+            _save_checkpoint(model, cfg, run_dir / "last.pt", epoch=epoch,
+                             history=history, best_metric=best_metric,
+                             best_epoch=best_epoch, resume_state=resume_state)
 
             if cfg.task == "box":
                 print(f"epoch {epoch:3d} | loss {train_loss:.4f} val {summary['val_loss']:.4f} | "
@@ -711,21 +951,44 @@ def train(cfg: TrainConfig) -> Tuple[CropCounter, Dict[str, List[float]], str, i
                       f"AP75 {summary['ap75']:.3f} AR100 {summary['ar100']:.3f} | "
                       f"P {summary['precision']:.3f} R {summary['recall']:.3f} "
                       f"F1 {summary['f1']:.3f} MAE {summary['count_mae']:.2f} | "
-                      f"lr {lr_now:.2e}{marker}")
+                      f"lr {lr_now:.2e}{backbone_note}{marker}")
             else:
                 print(f"epoch {epoch:3d} | loss {train_loss:.4f} val {summary['val_loss']:.4f} | "
                       f"val MAE {summary['count_mae']:.2f} RMSE {summary['count_rmse']:.2f} "
                       f"bias {summary['count_bias']:+.2f} | "
                       f"P {summary['precision']:.3f} R {summary['recall']:.3f} "
-                      f"F1 {summary['f1']:.3f} | lr {lr_now:.2e}{marker}")
+                      f"F1 {summary['f1']:.3f} | lr {lr_now:.2e}"
+                      f"{backbone_note}{marker}")
 
         with open(run_dir / "history.json", "w") as fh:
             json.dump(history, fh, indent=2)
         plot_history(history, run_dir / "curves.png")
 
-    print(f"done. best val loss {best_val_loss:.4f} (epoch {best_epoch}) | "
+    print(f"done. best {metric_key} {best_metric:.4f} (epoch {best_epoch}) | "
           f"artifacts in {run_dir.resolve()}")
     return model, history, run_name, best_epoch
+
+
+#: CLI arguments that override the config file, by TrainConfig field name.
+_OVERRIDE_FIELDS = (
+    "data_root", "weights_dir", "out_dir", "run_name", "epochs", "device",
+    "resume_from", "backbone_trainable", "backbone_lr", "select_on",
+)
+
+
+def apply_overrides(cfg: TrainConfig, args: Any) -> TrainConfig:
+    """Copy every command-line override that was actually given onto ``cfg``.
+
+    ``None`` means "not given", which is why ``--backbone-trainable`` is a
+    ``store_true`` with ``default=None``: argparse's usual ``False`` default
+    would silently refreeze a config that asked for an unfrozen trunk.
+    Modifies ``cfg`` in place and returns it.
+    """
+    for name in _OVERRIDE_FIELDS:
+        value = getattr(args, name, None)
+        if value is not None:
+            setattr(cfg, name, value)
+    return cfg
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -746,13 +1009,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--epochs", type=int, default=None, help="override the epoch count")
     parser.add_argument("--device", default=None,
                         help="force a torch device (cuda/mps/cpu); default auto-detects")
+    parser.add_argument("--resume", dest="resume_from", type=Path, default=None,
+                        help="a last.pt to continue a killed run from")
+    # default=None, not argparse's usual False: an absent flag must leave a
+    # config's own backbone_trainable: true alone.
+    parser.add_argument("--backbone-trainable", action="store_true", default=None,
+                        help="fine-tune the whole DINOv3 trunk, not just the decoder")
+    parser.add_argument("--backbone-lr", type=float, default=None,
+                        help="override the top backbone stage's learning rate")
+    parser.add_argument("--select-on", choices=sorted(SELECTION), default=None,
+                        help="which validation metric writes best.pt")
     args = parser.parse_args(argv)
 
     cfg = TrainConfig.from_json(args.config) if args.config else TrainConfig()
-    for name in ("data_root", "weights_dir", "out_dir", "run_name", "epochs", "device"):
-        value = getattr(args, name)
-        if value is not None:
-            setattr(cfg, name, value)
+    apply_overrides(cfg, args)
 
     train(cfg)
     return 0
