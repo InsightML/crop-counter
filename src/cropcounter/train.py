@@ -71,6 +71,11 @@ class TrainConfig:
     exclude_label_statuses: Tuple[str, ...] = ()
     num_workers: int = 4
 
+    #: Training-augmentation recipe: "wheat" (nadir crop photos, flips and 90-degree
+    #: rotations label-preserving) or "natural" (upright scenes; no VerticalFlip or
+    #: RandomRotate90). See CropTileDataset.default_transform.
+    augment_profile: str = "wheat"
+
     labels: Optional[Tuple[str, ...]] = COUNTED_LABELS  # Point labels to count
 
     val_freq: int = 1
@@ -228,6 +233,7 @@ def build_loaders(
         output_stride=cfg.output_stride, sigma=cfg.sigma,
         tiles_per_image=cfg.tiles_per_image, scale_jitter=cfg.scale_jitter,
         exclude_label_statuses=cfg.exclude_label_statuses,
+        augment_profile=cfg.augment_profile,
     )
     val_ds = CropTileDataset(
         val_recs, cfg.val_images_dir, train=False, output_stride=cfg.output_stride,
