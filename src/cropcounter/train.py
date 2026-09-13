@@ -17,11 +17,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import time
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -476,6 +477,59 @@ def build_optimizer_and_scheduler(
     return optimizer, scheduler
 
 
+#: Recipe fields worth flagging when a relaunch changes them mid-run.
+RESUME_RECIPE_FIELDS = (
+    "lr", "weight_decay", "backbone_lr", "backbone_layer_decay",
+    "backbone_weight_decay", "warmup_epochs", "epochs", "batch_size", "tile",
+    "select_on", "task",
+)
+
+#: Of those, the ones the restored optimizer state overwrites, so changing
+#: them on a resume records an intention that does not take effect.
+_OPTIMIZER_OWNED = (
+    "lr", "weight_decay", "backbone_lr", "backbone_layer_decay",
+    "backbone_weight_decay",
+)
+
+
+def _report_resume_drift(saved: Dict[str, Any], cfg: TrainConfig) -> None:
+    """Print one line per recipe field this relaunch changed.
+
+    A resume rebuilds the optimizer from the CURRENT config and then loads the
+    checkpoint's state over it, which puts the saved learning rates and weight
+    decays back — so a changed ``lr`` is reported here and is NOT in force.
+    Epoch count, batch size and tile size do take effect. Printing both kinds,
+    clearly labelled, beats a run whose actual recipe nobody can reconstruct.
+    """
+    changed = [
+        (field, saved.get(field), getattr(cfg, field))
+        for field in RESUME_RECIPE_FIELDS
+        if saved.get(field) != getattr(cfg, field)
+    ]
+    for field, before, now in changed:
+        print(f"resume: {field} checkpoint={before} now={now}")
+    stale = [field for field, _before, _now in changed if field in _OPTIMIZER_OWNED]
+    if stale:
+        print(f"resume: {', '.join(stale)} not applied — the restored optimizer "
+              "state carries the checkpoint's values")
+
+
+def _reimpose_schedule_horizon(scheduler, cfg: TrainConfig) -> None:
+    """Point a restored schedule at THIS run's epoch count.
+
+    ``scheduler.load_state_dict`` brings back the checkpoint's warmup length,
+    cosine horizon and hand-over epoch along with its position. Relaunching
+    with a longer ``--epochs`` would then anneal to zero at the OLD horizon
+    and warm-restart to the base rate for every epoch after it; a changed
+    ``warmup_epochs`` would hand over at the old epoch mid-ramp. All three
+    are overwritten from the current config.
+    """
+    warmup, cosine = scheduler._schedulers
+    warmup.total_iters = max(cfg.warmup_epochs, 1)
+    cosine.T_max = max(cfg.epochs - cfg.warmup_epochs, 1)
+    scheduler._milestones = [max(cfg.warmup_epochs, 1)]
+
+
 def _batch_loss(
     cfg: TrainConfig,
     outputs: Union[torch.Tensor, Dict[str, torch.Tensor]],
@@ -557,14 +611,16 @@ def selection_key(select_on: str, task: str) -> Tuple[str, int]:
     The direction is ``+1`` when a bigger number is better and ``-1`` when a
     smaller one is, which collapses the loop's comparison to a single
     ``sign * value > sign * best``. Raises ``ValueError`` for an unknown name,
-    or for a metric this task never computes — ``ap50`` on the point task,
-    say. Call it before the data loads so a config typo fails in a second
-    rather than an epoch.
+    for an unknown task, or for a metric this task never computes — ``ap50``
+    on the point task, say. Call it before the data loads so a config typo
+    fails in a second rather than an epoch.
     """
     if select_on not in SELECTION:
         raise ValueError(
             f"select_on must be one of {sorted(SELECTION)}, got {select_on!r}"
         )
+    if task not in HISTORY_KEYS:
+        raise ValueError(f"task must be one of {sorted(HISTORY_KEYS)}, got {task!r}")
     key, sign = SELECTION[select_on]
     if key not in set(HISTORY_KEYS[task].values()):
         raise ValueError(
@@ -600,6 +656,20 @@ def _append_history(
             )
 
 
+def _write_atomically(path: Path, write: Callable[[Path], None]) -> None:
+    """Write through a sibling ``.tmp`` file, then rename it into place.
+
+    ``os.replace`` is atomic within a directory, so any reader — ``--resume``
+    after a spot reclaim, or the background S3 sync running beside training —
+    sees either the whole previous file or the whole new one, never a
+    truncated checkpoint it would go on to trust. A process killed mid-write
+    leaves the ``.tmp`` behind and the real file untouched.
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    write(tmp)
+    os.replace(tmp, path)
+
+
 def _save_checkpoint(
     model: CropCounter,
     cfg: TrainConfig,
@@ -621,6 +691,9 @@ def _save_checkpoint(
     only when passed, which the loop does for ``last.pt`` alone: AdamW's two
     moments over an unfrozen trunk are about 700 MB, and ``best.pt`` is
     rewritten far more often than it is resumed from.
+
+    The write goes through :func:`_write_atomically`, so a run killed while
+    saving still has a loadable checkpoint from the epoch before.
     """
     payload: Dict[str, Any] = {
         "decoder": model.decoder.state_dict(),
@@ -634,7 +707,7 @@ def _save_checkpoint(
         payload["backbone"] = model.backbone.model.state_dict()
     if resume_state is not None:
         payload["resume_state"] = resume_state
-    torch.save(payload, path)
+    _write_atomically(path, lambda target: torch.save(payload, target))
 
 
 def load_backbone_from(model: CropCounter, path: Path) -> None:
@@ -766,18 +839,35 @@ def train(cfg: TrainConfig) -> Tuple[CropCounter, Dict[str, List[float]], str, i
     metric_key, metric_sign = selection_key(cfg.select_on, cfg.task)
 
     resume: Optional[Dict[str, Any]] = None
+    resume_path: Optional[Path] = None
+    saved_select_on = cfg.select_on
     if cfg.resume_from is not None:
         resume_path = Path(cfg.resume_from)
+        # Validated before the data and the model are built, so the easy
+        # mistake costs a second rather than a dataset scan.
         resume = torch.load(resume_path, map_location=device, weights_only=False)
+        if "resume_state" not in resume:
+            raise ValueError(
+                f"{resume_path} is not a resumable checkpoint (no resume_state): "
+                "pass last.pt"
+            )
         print(f"resuming from {resume_path} at epoch {resume['epoch'] + 1}")
+        saved_config = dict(resume["config"])
+        saved_select_on = saved_config.get("select_on", "val_loss")
+        _report_resume_drift(saved_config, cfg)
+        # The path stays a local. Baking it into config.json or a checkpoint
+        # would make re-running that config silently resume — or, once the
+        # epoch count is reached, train nothing at all.
+        cfg = replace(cfg, resume_from=None)
 
-    # A relaunch lands back in the run directory it was killed in.
-    default_name = (
-        Path(cfg.resume_from).parent.name if resume is not None
-        else time.strftime("%Y%m%d_%H%M%S")
-    )
-    run_name = cfg.run_name or default_name
-    run_dir = Path(cfg.out_dir) / run_name
+    if resume is not None and cfg.run_name is None:
+        # A relaunch lands back in the directory the checkpoint lives in, which
+        # is not necessarily out_dir/<name> — the run may have been moved.
+        run_dir = resume_path.resolve().parent
+        run_name = run_dir.name
+    else:
+        run_name = cfg.run_name or time.strftime("%Y%m%d_%H%M%S")
+        run_dir = Path(cfg.out_dir) / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     cfg.to_json(run_dir / "config.json")
 
@@ -829,11 +919,20 @@ def train(cfg: TrainConfig) -> Tuple[CropCounter, Dict[str, List[float]], str, i
     if resume is not None:
         optimizer.load_state_dict(resume["resume_state"]["optimizer"])
         scheduler.load_state_dict(resume["resume_state"]["scheduler"])
+        _reimpose_schedule_horizon(scheduler, cfg)
         if scaler is not None and resume["resume_state"]["scaler"] is not None:
             scaler.load_state_dict(resume["resume_state"]["scaler"])
         history = resume["history"]
-        best_metric, best_epoch = resume["best_metric"], resume["best_epoch"]
         start_epoch = resume["epoch"] + 1
+        if saved_select_on == cfg.select_on:
+            best_metric, best_epoch = resume["best_metric"], resume["best_epoch"]
+        else:
+            # A val_loss best and an AP50 best are not on the same scale, so
+            # carrying one over would either lock best.pt or overwrite it on
+            # the first epoch regardless of quality. Start the race again.
+            print("resume: best-so-far discarded — the saved best is a "
+                  f"{saved_select_on} score and this run selects on "
+                  f"{cfg.select_on}")
         del resume    # an unfrozen run's optimizer state is hundreds of MB
 
     for epoch in range(start_epoch, cfg.epochs + 1):
@@ -961,8 +1060,10 @@ def train(cfg: TrainConfig) -> Tuple[CropCounter, Dict[str, List[float]], str, i
                       f"F1 {summary['f1']:.3f} | lr {lr_now:.2e}"
                       f"{backbone_note}{marker}")
 
-        with open(run_dir / "history.json", "w") as fh:
-            json.dump(history, fh, indent=2)
+        _write_atomically(
+            run_dir / "history.json",
+            lambda target: target.write_text(json.dumps(history, indent=2), encoding="utf-8"),
+        )
         plot_history(history, run_dir / "curves.png")
 
     print(f"done. best {metric_key} {best_metric:.4f} (epoch {best_epoch}) | "
