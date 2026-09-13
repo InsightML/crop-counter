@@ -50,7 +50,7 @@ nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv 2>/
 echo '--- disk ---'
 df -h $NVME 2>/dev/null | tail -n 1
 echo '--- cloud-init bootstrap tail ---'
-tail -n 15 /var/log/cfd-bootstrap.log 2>/dev/null || echo '(no bootstrap log yet)'
+tail -c 20000 /var/log/cfd-bootstrap.log 2>/dev/null | tr '\\r' '\\n' | grep -v '^Completed' | tail -n 15 | cut -c1-300 || echo '(no bootstrap log yet)'
 echo '--- run_all.log (last $LINES) ---'
 tail -n $LINES $NVME/runs/run_all.log 2>/dev/null | cut -c1-400 || echo '(no log yet)'
 REMOTE_EOF

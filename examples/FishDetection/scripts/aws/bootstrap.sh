@@ -108,7 +108,7 @@ if [ -f "$REPO_DIR/pyproject.toml" ]; then
     echo "code already unpacked at $REPO_DIR"
 else
     mkdir -p "$REPO_DIR"
-    aws s3 cp --region "$S3_REGION" "$S3_URI/$CODE_KEY" /tmp/crop-counter-code.tgz
+    aws s3 cp --region "$S3_REGION" "$S3_URI/$CODE_KEY" /tmp/crop-counter-code.tgz --only-show-errors
     tar -xzf /tmp/crop-counter-code.tgz -C "$REPO_DIR"
     rm -f /tmp/crop-counter-code.tgz
 fi
@@ -119,11 +119,11 @@ echo "code: $CODE_KEY (branch $BRANCH)"
 mkdir -p "$REPO_DIR/weights" "$REPO_DIR/data/cfd" "$NVME/runs" "$NVME/results" "$NVME/cfd17"
 for f in dinov3_convnext_base_pretrain_lvd1689m-801f2ba9.pth decoder_best.pt; do
     [ -f "$REPO_DIR/weights/$f" ] || \
-        aws s3 cp --region "$S3_REGION" "$S3_URI/inputs/$f" "$REPO_DIR/weights/$f"
+        aws s3 cp --region "$S3_REGION" "$S3_URI/inputs/$f" "$REPO_DIR/weights/$f" --only-show-errors
 done
 META=community_fish_detection_dataset.json.zip
 [ -f "$REPO_DIR/data/cfd/$META" ] || \
-    aws s3 cp --region "$S3_REGION" "$S3_URI/inputs/$META" "$REPO_DIR/data/cfd/$META"
+    aws s3 cp --region "$S3_REGION" "$S3_URI/inputs/$META" "$REPO_DIR/data/cfd/$META" --only-show-errors
 
 # --- resume ----------------------------------------------------------------- #
 if [ "$RESUME" = "1" ]; then
