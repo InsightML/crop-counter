@@ -52,9 +52,10 @@ if [ -s "$ID_FILE" ]; then
         aws_ec2 terminate-instances --instance-ids "$INSTANCE_ID" \
             --query 'TerminatingInstances[0].[InstanceId,CurrentState.Name]' --output text
         echo "waiting for terminated..."
-        aws_ec2 wait instance-terminated --instance-ids "$INSTANCE_ID"
+        aws_ec2 wait instance-terminated --instance-ids "$INSTANCE_ID" \
+            || echo "warning: waiter timed out — the terminate request was accepted; check the console"
         rm -f "$ID_FILE"
-        echo "terminated; removed $ID_FILE"
+        echo "terminate requested; removed $ID_FILE"
     else
         echo "left running"
     fi
@@ -70,7 +71,11 @@ if [ "$DELETE_ALL" -eq 1 ]; then
             --filters "Name=group-name,Values=$SG_NAME" "Name=vpc-id,Values=$VPC_ID" \
             --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo None)"
         if [ -n "$SG_ID" ] && [ "$SG_ID" != "None" ]; then
-            aws_ec2 delete-security-group --group-id "$SG_ID" && echo "deleted sg $SG_ID"
+            if aws_ec2 delete-security-group --group-id "$SG_ID"; then
+                echo "deleted sg $SG_ID"
+            else
+                echo "warning: could not delete sg $SG_ID (still attached to an instance?) — continuing" >&2
+            fi
         fi
         # A role cannot be deleted while it is in an instance profile, and a
         # profile cannot be deleted while it holds a role.

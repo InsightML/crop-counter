@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -55,7 +56,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resolution", type=int, default=None,
                         help="force the model's input resolution; omit to let the checkpoint "
                              "declare its own (what the notebook does)")
-    parser.add_argument("--limit", type=int, default=None, help="stop after N images (debug)")
+    parser.add_argument("--max-dets", type=int, default=100,
+                        help="keep the top-N detections per image by score (default 100 = "
+                             "COCOeval's maxDets, so AP/AR100 are unchanged and the file is "
+                             "3x smaller than a 300-query DETR dump)")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="score only the first N images (debug). The outputs are then "
+                             "written as <out>.limitN.json / row <name>_limitN, never as the "
+                             "real files, and AP is computed over those N images only")
     return parser
 
 
@@ -113,8 +121,8 @@ def load_model(checkpoint: Path, device: str, resolution):
             model = from_checkpoint(str(checkpoint), **clean)
             print(f"from_checkpoint({checkpoint.name}, {clean}) ok")
             return model
-        except TypeError as exc:
-            print(f"from_checkpoint rejected {clean}: {exc}")
+        except Exception as exc:  # noqa: BLE001 - TypeError or pydantic ValidationError
+            print(f"from_checkpoint rejected {clean}: {type(exc).__name__}: {exc}")
     raise SystemExit("from_checkpoint refused every argument combination")
 
 
@@ -148,14 +156,20 @@ def main(argv=None) -> int:
     category_id = categories[0]["id"] if categories else DEFAULT_CATEGORY_ID
 
     names = list(id_by_name)
+    row_name, out_path = args.name, args.out
     if args.limit is not None:
         names = names[: args.limit]
+        # A truncated set must never masquerade as the real one: run_all.sh's
+        # file guard would otherwise keep it forever.
+        row_name = f"{args.name}_limit{args.limit}"
+        out_path = args.out.with_name(f"{args.out.stem}.limit{args.limit}{args.out.suffix}")
     print(f"{len(names)} val images | category_id {category_id} | device {device} "
           f"| threshold {args.threshold}")
 
     model = load_model(checkpoint, device, args.resolution)
 
     detections = []
+    scored_ids = []
     missing = 0
     started = time.time()
     for name in tqdm(names, desc=args.name):
@@ -167,22 +181,35 @@ def main(argv=None) -> int:
         with Image.open(path) as handle:
             image = handle.convert("RGB")
         predicted = model.predict(image, threshold=args.threshold)
-        for (x1, y1, x2, y2), score in zip(predicted.xyxy, predicted.confidence):
+        pairs = sorted(zip(predicted.xyxy, predicted.confidence),
+                       key=lambda pair: float(pair[1]), reverse=True)[: args.max_dets]
+        for (x1, y1, x2, y2), score in pairs:
             detections.append({
                 "image_id": image_id,
                 "category_id": category_id,
                 "bbox": [float(x1), float(y1), float(x2 - x1), float(y2 - y1)],
                 "score": float(score),
             })
+        scored_ids.append(image_id)
     seconds = time.time() - started
     scored = len(names) - missing
     if missing:
         print(f"warning: {missing} of {len(names)} images were not on disk", file=sys.stderr)
     if not scored:
         raise SystemExit("no images scored — check --images")
+    if not detections:
+        raise SystemExit("the model produced zero detections at this threshold — refusing to "
+                         "write an empty predictions file")
 
-    write_coco_results(detections, args.out)
-    row = coco_eval(args.annotations, detections)
+    # Write to a temp name and rename, so a kill mid-dump can never leave a
+    # truncated file that run_all.sh's existence guard would then trust.
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_out = out_path.with_name(out_path.name + ".tmp")
+    write_coco_results(detections, tmp_out)
+    os.replace(tmp_out, out_path)
+    # With --limit, score against the images actually run, not the whole split.
+    row = coco_eval(args.annotations, detections,
+                    image_ids=scored_ids if args.limit is not None else None)
     row = {key: float(row[key]) for key in ("ap", "ap50", "ap75", "ar100")}
     row.update({
         "seconds_per_image": seconds / scored,
@@ -192,7 +219,9 @@ def main(argv=None) -> int:
         "threshold": args.threshold,
         "device": device,
         "side": args.side,
-        "predictions": str(args.out),
+        "max_dets": args.max_dets,
+        "limit": args.limit,
+        "predictions": str(out_path),
     })
 
     args.metrics.parent.mkdir(parents=True, exist_ok=True)
@@ -200,13 +229,13 @@ def main(argv=None) -> int:
     if args.metrics.exists():
         with args.metrics.open(encoding="utf-8") as fh:
             metrics = json.load(fh)
-    metrics[args.name] = {**metrics.get(args.name, {}), **row}
+    metrics[row_name] = {**metrics.get(row_name, {}), **row}
     with args.metrics.open("w", encoding="utf-8") as fh:
         json.dump(metrics, fh, indent=1)
 
-    print(f"{args.name}: AP {row['ap']:.4f} AP50 {row['ap50']:.4f} AP75 {row['ap75']:.4f} "
+    print(f"{row_name}: AP {row['ap']:.4f} AP50 {row['ap50']:.4f} AP75 {row['ap75']:.4f} "
           f"AR100 {row['ar100']:.4f} | {len(detections)} dets over {scored} images "
-          f"| {row['seconds_per_image']:.3f} s/image -> {args.out}")
+          f"| {row['seconds_per_image']:.3f} s/image -> {out_path}")
     return 0
 
 

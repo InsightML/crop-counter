@@ -76,11 +76,19 @@ on_exit() {
         kill "$SYNC_PID" 2>/dev/null || true
         wait "$SYNC_PID" 2>/dev/null || true
     fi
-    sync_once
+    # Print BEFORE the final sync so the copy of this log on S3 carries the verdict.
     echo "end   $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    echo "ALL DONE rc=$rc wall=$(( SECONDS - START_EPOCH ))s ($(( (SECONDS - START_EPOCH) / 60 ))m) runs=$RUNS_DIR results=$RESULTS_DIR"
+    if [ "$rc" -eq 0 ]; then
+        echo "ALL DONE wall=$(( SECONDS - START_EPOCH ))s ($(( (SECONDS - START_EPOCH) / 60 ))m) runs=$RUNS_DIR results=$RESULTS_DIR"
+    else
+        echo "FAILED rc=$rc wall=$(( SECONDS - START_EPOCH ))s ($(( (SECONDS - START_EPOCH) / 60 ))m) — see above"
+    fi
+    sync_once
 }
 trap on_exit EXIT
+# A spot reclaim shuts the box down with SIGTERM; without this the EXIT trap
+# (and its final sync of last.pt) would never run.
+trap 'exit 143' TERM INT
 
 echo "======================================================================"
 echo "start $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -157,7 +165,31 @@ else
     "$PY" -m cropcounter.cfd fetch \
         --subset "$DATA_ROOT" --max-side 1024 --workers "$FETCH_WORKERS" \
         --mirror "$MIRROR" --no-progress
+    # Coverage gate before the marker: the live annotations must still hold
+    # >= MIN_FETCH_COVERAGE of the subset's images per split (a dead mirror
+    # would otherwise pin an empty split behind .fetched forever).
+    "$PY" - "$DATA_ROOT" "${MIN_FETCH_COVERAGE:-0.95}" <<'PYGATE'
+import json, sys
+from pathlib import Path
+root, floor = Path(sys.argv[1]), float(sys.argv[2])
+want = json.load(open(root / "subset_summary.json"))["n_images"]
+for split in ("train", "val"):
+    have = len(json.load(open(root / split / "annotations.json"))["images"])
+    frac = have / max(want[split], 1)
+    print(f"[gate] {split}: {have}/{want[split]} images on disk ({frac:.1%})")
+    if have == 0 or frac < floor:
+        sys.exit(f"ABORT: {split} coverage {frac:.1%} < {floor:.0%} — fetch failed too often; not writing .fetched")
+PYGATE
     date -u '+%Y-%m-%dT%H:%M:%SZ' > "$DATA_ROOT/.fetched"
+fi
+
+if [ -n "$S3_URI" ]; then
+    # Post-fetch copy of the split metadata: annotations.json is now PRUNED to
+    # what fetch could download (and annotations.native.json exists), so a
+    # --resume restores the very same val set the predictions were made on
+    # instead of re-deriving it from the master and re-rolling the failures.
+    aws s3 sync "$DATA_ROOT" "$S3_URI/data-manifest" \
+        --exclude '*/images/*' --exclude '.fetched' --only-show-errors || true
 fi
 
 # --- 6. the two training runs ----------------------------------------------- #
@@ -214,6 +246,12 @@ run_baseline() {
 
 run_baseline rfdetr_nano_640 "$RFDETR_NANO_URL" 640
 run_baseline rfdetr_medium_1024 "$RFDETR_MEDIUM_URL" 1024
+
+# GFLOPs for both baselines into the same metrics file (needs autograd on; the
+# script handles that). Report-only: a failure here must not stop the run.
+echo "[run ] rfdetr_flops"
+"$PY" "$HERE/rfdetr_flops.py" --weights "$WEIGHTS_DIR/baselines" \
+    --metrics "$RESULTS_DIR/baseline_metrics.json" || echo "[warn] rfdetr_flops failed"
 
 # --- 8. one scorer over everything ------------------------------------------ #
 echo "[run ] evaluate_cfd17"

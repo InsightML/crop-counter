@@ -6,6 +6,7 @@
 #   ./launch.sh              fresh run
 #   ./launch.sh --resume     pull runs/ + results/ back from S3 and carry on
 #   ./launch.sh --dry-run    permissions check only, nothing is created
+#   ./launch.sh --force      launch even though .aws-instance-id names a live box
 set -euo pipefail
 
 REGION="${REGION:-us-east-1}"
@@ -33,21 +34,30 @@ ID_FILE="$REPO/.aws-instance-id"
 
 RESUME=0
 DRY_RUN=""
+FORCE=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --resume) RESUME=1 ;;
         --dry-run) DRY_RUN="--dry-run" ;;
+        --force) FORCE=1 ;;
         -h|--help) awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
     shift
 done
 
-if [ -s "$ID_FILE" ]; then
-    echo "warning: $ID_FILE already holds $(cat "$ID_FILE") — check status.sh / teardown.sh" >&2
-fi
-
 aws_ec2() { aws ec2 --region "$REGION" "$@"; }
+
+if [ -s "$ID_FILE" ] && [ -z "$DRY_RUN" ]; then
+    OLD_ID="$(tr -d '[:space:]' < "$ID_FILE")"
+    OLD_STATE="$(aws_ec2 describe-instances --instance-ids "$OLD_ID" \
+        --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo gone)"
+    if [ "$OLD_STATE" != "terminated" ] && [ "$OLD_STATE" != "gone" ] && [ "$FORCE" != "1" ]; then
+        echo "refusing to launch: $ID_FILE holds $OLD_ID which is still '$OLD_STATE'." >&2
+        echo "run teardown.sh first, or pass --force to launch a second box anyway." >&2
+        exit 1
+    fi
+fi
 
 PROFILE_ARN="$(aws iam get-instance-profile --instance-profile-name "$PROFILE_NAME" \
     --query 'InstanceProfile.Arn' --output text)"

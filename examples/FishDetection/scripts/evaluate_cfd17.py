@@ -133,9 +133,18 @@ def main(argv=None) -> int:
         raise SystemExit(f"no val annotations at {annotations_path}")
     with annotations_path.open(encoding="utf-8") as fh:
         gt = json.load(fh)
+    # Parse the GT into pycocotools ONCE; coco_eval accepts the COCO object, so
+    # 18 scopes x N prediction sets do not re-index 37k images each time.
+    import contextlib
+    import io
+
+    from pycocotools.coco import COCO
+    with contextlib.redirect_stdout(io.StringIO()):
+        coco_gt = COCO(str(annotations_path))
 
     images = gt["images"]
     image_ids = [im["id"] for im in images]
+    known_ids = set(image_ids)
     gt_boxes: "dict" = defaultdict(list)
     for ann in gt["annotations"]:
         gt_boxes[ann["image_id"]].append(ann["bbox"])
@@ -161,10 +170,34 @@ def main(argv=None) -> int:
     summary = {}
 
     for name, path, run_dir in targets:
-        detections = read_coco_results(path)
+        raw = read_coco_results(path)
+        # Only detections on images of THIS split are scoreable: pycocotools
+        # asserts on an unknown image id, and a prediction set written against
+        # an earlier fetch (a --resume that re-rolled a 404) or a different
+        # split would otherwise abort the whole scorer. Loud, never silent.
+        detections = [d for d in raw if d["image_id"] in known_ids]
+        n_dropped = len(raw) - len(detections)
+        missing_images = {d["image_id"] for d in raw if d["image_id"] not in known_ids}
+        if n_dropped:
+            print(f"  WARNING {name}: {n_dropped} detections on {len(missing_images)} image(s) "
+                  f"not in this split were ignored — that prediction set was made against a "
+                  f"different val set; re-run it before quoting its numbers", flush=True)
+        if not detections:
+            print(f"  SKIP {name}: no detections on this split's images ({path})")
+            continue
         by_id: "dict" = defaultdict(list)
         for det in detections:
             by_id[det["image_id"]].append((det["bbox"], det["score"]))
+        # COCOeval keeps the top maxDets=100 per image by score; handing it
+        # only those is identical in result and 3x cheaper for a 300-query
+        # DETR set. The tau sweep below still sees every detection.
+        for_coco: "dict" = {}
+        for det in detections:
+            for_coco.setdefault(det["image_id"], []).append(det)
+        for image_id, dets in for_coco.items():
+            if len(dets) > 100:
+                dets.sort(key=lambda d: d["score"], reverse=True)
+                del dets[100:]
 
         def triples(ids, by_id=by_id):
             for image_id in ids:
@@ -175,16 +208,29 @@ def main(argv=None) -> int:
                     boxes_xywh_to_xyxy(np.array(gt_boxes.get(image_id, []), dtype=np.float32)),
                 )
 
-        entry = {"predictions": str(path), "n_detections": len(detections), "scopes": {}}
+        entry = {
+            "predictions": str(path), "n_detections": len(detections),
+            "n_detections_ignored": n_dropped, "n_images_not_in_split": len(missing_images),
+            "scopes": {},
+        }
         for scope, ids in scopes.items():
-            stats = coco_eval(
-                annotations_path, detections,
-                image_ids=None if scope == "full" else ids,
-            )
+            n_gt = sum(len(gt_boxes.get(i, ())) for i in ids)
+            scope_dets = [d for i in ids for d in for_coco.get(i, ())]
+            if n_gt == 0 or not scope_dets:
+                # No GT (or nothing predicted) in scope: pycocotools would print
+                # -1 or 0 here, indistinguishable from a dead source. Say NaN.
+                stats = {k: float("nan") for k in ("ap", "ap50", "ap75", "ar100")}
+                if n_gt == 0:
+                    print(f"  note {name}/{scope}: no GT boxes in scope -> AP NaN")
+            else:
+                stats = coco_eval(
+                    coco_gt, scope_dets, image_ids=None if scope == "full" else ids,
+                )
             sweep = sweep_tau_from_detections(triples(ids), taus, match_iou=args.match_iou)
             calibration = calibrate(sweep)
             record = {
                 "n_images": len(ids),
+                "n_gt_boxes": n_gt,
                 **{key: float(stats[key]) for key in ("ap", "ap50", "ap75", "ar100")},
                 **calibration,
                 "sweep": sweep,

@@ -2,7 +2,7 @@
 # What is the benchmark box doing? Instance state + the tail of run_all.log +
 # GPU utilisation, fetched over SSM (the SG has no ingress, so there is no ssh).
 #
-#   ./status.sh          last 200 log lines
+#   ./status.sh          last 80 log lines
 #   ./status.sh 1000     last 1000
 set -euo pipefail
 
@@ -10,7 +10,7 @@ REGION="${REGION:-us-east-1}"
 BUCKET="${BUCKET:-insightml-cfd-benchmark}"
 S3_URI="${S3_URI:-s3://$BUCKET}"
 NVME="${NVME:-/opt/dlami/nvme}"
-LINES="${1:-200}"
+LINES="${1:-80}"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="${REPO:-$(cd "$HERE/../../../.." && pwd)}"
@@ -41,15 +41,17 @@ if [ "$STATE" != "running" ]; then
     echo "instance is not running — skipping the SSM probe"
 else
     # The remote command is base64'd so quoting cannot be mangled on the way in.
+    # GPU and disk first: GetCommandInvocation truncates stdout at 24,000
+    # characters, so a long log tail must be the thing that gets cut.
     REMOTE="$(cat <<REMOTE_EOF
-echo '--- run_all.log (last $LINES) ---'
-tail -n $LINES $NVME/runs/run_all.log 2>/dev/null || echo '(no log yet)'
-echo '--- cloud-init bootstrap tail ---'
-tail -n 20 /var/log/cfd-bootstrap.log 2>/dev/null || echo '(no bootstrap log yet)'
 echo '--- gpu ---'
 nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv 2>/dev/null || echo '(no nvidia-smi)'
 echo '--- disk ---'
 df -h $NVME 2>/dev/null | tail -n 1
+echo '--- cloud-init bootstrap tail ---'
+tail -n 15 /var/log/cfd-bootstrap.log 2>/dev/null || echo '(no bootstrap log yet)'
+echo '--- run_all.log (last $LINES) ---'
+tail -n $LINES $NVME/runs/run_all.log 2>/dev/null | cut -c1-400 || echo '(no log yet)'
 REMOTE_EOF
 )"
     B64="$(printf '%s' "$REMOTE" | base64 | tr -d '\n')"

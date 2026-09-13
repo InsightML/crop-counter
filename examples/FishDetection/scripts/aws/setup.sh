@@ -29,7 +29,12 @@ if aws_s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1; then
 else
     # us-east-1 is the one region where create-bucket must NOT get a
     # LocationConstraint; this whole stack is us-east-1, so no branch is needed.
-    aws_s3api create-bucket --bucket "$BUCKET"
+    if [ "$REGION" = "us-east-1" ]; then
+        aws_s3api create-bucket --bucket "$BUCKET"
+    else
+        aws_s3api create-bucket --bucket "$BUCKET" \
+            --create-bucket-configuration "LocationConstraint=$REGION"
+    fi
     echo "   created"
 fi
 
@@ -72,7 +77,8 @@ if aws iam get-instance-profile --instance-profile-name "$PROFILE_NAME" >/dev/nu
 else
     aws iam create-instance-profile --instance-profile-name "$PROFILE_NAME" \
         --tags "Key=project,Value=$PROJECT_TAG" >/dev/null
-    echo "   created"
+    echo "   created (waiting 10s for IAM propagation so a launch right after this works)"
+    sleep 10
 fi
 if aws iam get-instance-profile --instance-profile-name "$PROFILE_NAME" \
         --query "InstanceProfile.Roles[?RoleName=='$ROLE'].RoleName" --output text \
@@ -109,8 +115,14 @@ fi
 # outbound connection from the agent. Egress: 443 (SSM/S3/PyPI/GitHub/MLflow),
 # 53 (DNS), 123/udp (NTP), 80 (apt).
 add_egress() {
-    aws_ec2 authorize-security-group-egress --group-id "$SG_ID" --ip-permissions "$1" \
-        >/dev/null 2>&1 || true
+    # Idempotent: only a duplicate-rule error is ignored; anything else is fatal
+    # (a swallowed failure would leave the box with no egress and SSM unreachable).
+    local err
+    if err="$(aws_ec2 authorize-security-group-egress --group-id "$SG_ID" \
+            --ip-permissions "$1" 2>&1 >/dev/null)"; then
+        return 0
+    fi
+    grep -q 'InvalidPermission.Duplicate' <<<"$err" || { echo "$err" >&2; return 1; }
 }
 add_egress 'IpProtocol=tcp,FromPort=443,ToPort=443,IpRanges=[{CidrIp=0.0.0.0/0,Description=https}]'
 add_egress 'IpProtocol=tcp,FromPort=80,ToPort=80,IpRanges=[{CidrIp=0.0.0.0/0,Description=apt}]'
@@ -123,8 +135,8 @@ echo "== staging inputs to s3://$BUCKET/inputs/ =="
 stage() {
     local local_path="$1" key="inputs/$(basename "$1")"
     if [ ! -f "$local_path" ]; then
-        echo "   MISSING $local_path — skipped" >&2
-        return 0
+        echo "   MISSING $local_path — the box cannot run without it" >&2
+        return 1
     fi
     local size remote
     size="$(wc -c < "$local_path" | tr -d ' ')"
