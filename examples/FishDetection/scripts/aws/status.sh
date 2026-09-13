@@ -7,6 +7,7 @@
 set -euo pipefail
 
 REGION="${REGION:-us-east-1}"
+S3_REGION="${S3_REGION:-us-east-1}"
 BUCKET="${BUCKET:-insightml-cfd-benchmark}"
 S3_URI="${S3_URI:-s3://$BUCKET}"
 NVME="${NVME:-/opt/dlami/nvme}"
@@ -76,4 +77,4 @@ REMOTE_EOF
 fi
 
 echo "--- synced history.json in $S3_URI/runs ---"
-aws s3 ls --region "$REGION" --recursive "$S3_URI/runs" | grep history.json || echo "(none yet)"
+aws s3 ls --region "$S3_REGION" --recursive "$S3_URI/runs" | grep history.json || echo "(none yet)"

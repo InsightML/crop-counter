@@ -10,6 +10,7 @@
 set -euo pipefail
 
 REGION="${REGION:-us-east-1}"
+S3_REGION="${S3_REGION:-us-east-1}"     # the bucket's region (see setup.sh)
 BUCKET="${BUCKET:-insightml-cfd-benchmark}"
 S3_URI="${S3_URI:-s3://$BUCKET}"
 PROFILE_NAME="${PROFILE_NAME:-cfd-benchmark-ec2}"
@@ -88,12 +89,12 @@ if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ] && [ "$ALL
 fi
 CODE_KEY="code/crop-counter-${SHA}.tgz"
 if [ -z "$DRY_RUN" ]; then
-    if aws s3api head-object --region "$REGION" --bucket "$BUCKET" --key "$CODE_KEY" >/dev/null 2>&1; then
+    if aws s3api head-object --region "$S3_REGION" --bucket "$BUCKET" --key "$CODE_KEY" >/dev/null 2>&1; then
         echo "code         $CODE_KEY already in the bucket"
     else
         CODE_TGZ="$(mktemp -t cfd-code.XXXXXX)"
         git -C "$REPO" archive --format=tar.gz -o "$CODE_TGZ" HEAD
-        aws s3 cp --region "$REGION" "$CODE_TGZ" "s3://$BUCKET/$CODE_KEY" --only-show-errors
+        aws s3 cp --region "$S3_REGION" "$CODE_TGZ" "s3://$BUCKET/$CODE_KEY" --only-show-errors
         rm -f "$CODE_TGZ"
         echo "code         uploaded $CODE_KEY"
     fi
@@ -106,6 +107,8 @@ sed -e "s|__BRANCH__|${BRANCH}|g" \
     -e "s|__S3_URI__|${S3_URI}|g" \
     -e "s|__RESUME__|${RESUME}|g" \
     -e "s|__CODE_KEY__|${CODE_KEY}|g" \
+    -e "s|__REGION__|${REGION}|g" \
+    -e "s|__S3_REGION__|${S3_REGION}|g" \
     "$HERE/bootstrap.sh" > "$USER_DATA"
 
 RUN_ARGS=(

@@ -16,7 +16,8 @@ RESUME="${RESUME:-__RESUME__}"
 # instance, so no GitHub credential ever travels here).
 CODE_KEY="${CODE_KEY:-__CODE_KEY__}"
 
-REGION="${REGION:-us-east-1}"
+REGION="${REGION:-__REGION__}"            # where this box runs
+S3_REGION="${S3_REGION:-__S3_REGION__}"   # where the bucket lives (us-east-1)
 SSM_REGION="${SSM_REGION:-eu-west-2}"     # the MLflow SecureStrings live here
 NVME="${NVME:-/opt/dlami/nvme}"
 
@@ -51,7 +52,7 @@ aws --version
 # policy is involved. The heredoc is single-quoted: nothing expands host-side.
 sudo -u ubuntu -H env \
     BRANCH="$BRANCH" S3_URI="$S3_URI" RESUME="$RESUME" CODE_KEY="$CODE_KEY" \
-    REGION="$REGION" SSM_REGION="$SSM_REGION" NVME="$NVME" \
+    REGION="$REGION" S3_REGION="$S3_REGION" SSM_REGION="$SSM_REGION" NVME="$NVME" \
     bash -s <<'UBUNTU'
 set -euo pipefail
 REPO_DIR="$NVME/crop-counter"
@@ -101,7 +102,7 @@ if [ -f "$REPO_DIR/pyproject.toml" ]; then
     echo "code already unpacked at $REPO_DIR"
 else
     mkdir -p "$REPO_DIR"
-    aws s3 cp --region "$REGION" "$S3_URI/$CODE_KEY" /tmp/crop-counter-code.tgz
+    aws s3 cp --region "$S3_REGION" "$S3_URI/$CODE_KEY" /tmp/crop-counter-code.tgz
     tar -xzf /tmp/crop-counter-code.tgz -C "$REPO_DIR"
     rm -f /tmp/crop-counter-code.tgz
 fi
@@ -112,23 +113,23 @@ echo "code: $CODE_KEY (branch $BRANCH)"
 mkdir -p "$REPO_DIR/weights" "$REPO_DIR/data/cfd" "$NVME/runs" "$NVME/results" "$NVME/cfd17"
 for f in dinov3_convnext_base_pretrain_lvd1689m-801f2ba9.pth decoder_best.pt; do
     [ -f "$REPO_DIR/weights/$f" ] || \
-        aws s3 cp --region "$REGION" "$S3_URI/inputs/$f" "$REPO_DIR/weights/$f"
+        aws s3 cp --region "$S3_REGION" "$S3_URI/inputs/$f" "$REPO_DIR/weights/$f"
 done
 META=community_fish_detection_dataset.json.zip
 [ -f "$REPO_DIR/data/cfd/$META" ] || \
-    aws s3 cp --region "$REGION" "$S3_URI/inputs/$META" "$REPO_DIR/data/cfd/$META"
+    aws s3 cp --region "$S3_REGION" "$S3_URI/inputs/$META" "$REPO_DIR/data/cfd/$META"
 
 # --- resume ----------------------------------------------------------------- #
 if [ "$RESUME" = "1" ]; then
     echo "resuming: pulling runs/, results/ and the subset metadata back down"
     # Fatal if these fail: a resume that silently starts fresh would then
     # overwrite the checkpoints on S3 with an inferior run.
-    aws s3 sync --region "$REGION" "$S3_URI/runs" "$NVME/runs" --only-show-errors
-    aws s3 sync --region "$REGION" "$S3_URI/results" "$NVME/results" --only-show-errors
+    aws s3 sync --region "$S3_REGION" "$S3_URI/runs" "$NVME/runs" --only-show-errors
+    aws s3 sync --region "$S3_REGION" "$S3_URI/results" "$NVME/results" --only-show-errors
     # The COCO jsons + subset_summary, so the streaming subset pass is skipped.
     # The pixels are NOT restored: the instance store is empty, so fetch re-pulls
     # them, and the .fetched marker is deliberately removed afterwards.
-    aws s3 sync --region "$REGION" "$S3_URI/data-manifest" "$NVME/cfd17" --only-show-errors || true
+    aws s3 sync --region "$S3_REGION" "$S3_URI/data-manifest" "$NVME/cfd17" --only-show-errors || true
     rm -f "$NVME/cfd17/.fetched"
     # A run dir that came back without a .done marker resumes from its last.pt.
 fi
@@ -150,6 +151,9 @@ unset MLFLOW_PW
 # --- go --------------------------------------------------------------------- #
 export DATA_ROOT="$NVME/cfd17" RUNS_DIR="$NVME/runs" RESULTS_DIR="$NVME/results"
 export S3_URI DEVICE=cuda
+# run_all.sh's `aws s3 sync` calls carry no --region: the high-level s3 commands
+# resolve the bucket's region themselves, but a default region must exist.
+export AWS_DEFAULT_REGION="$S3_REGION"
 # setsid: a new session, so the end of cloud-init's unit cannot take the run
 # with it; stdin from /dev/null so the child never reads this heredoc.
 setsid nohup bash "$REPO_DIR/examples/FishDetection/scripts/run_all.sh" \

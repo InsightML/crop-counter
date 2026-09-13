@@ -7,6 +7,9 @@
 set -euo pipefail
 
 REGION="${REGION:-us-east-1}"
+# The bucket stays in us-east-1 even when the box runs elsewhere (S3 is global-
+# named; the data is small enough that cross-region reads do not matter).
+S3_REGION="${S3_REGION:-us-east-1}"
 # The MLflow SecureStrings live in eu-west-2; everything else is us-east-1.
 SSM_REGION="${SSM_REGION:-eu-west-2}"
 ACCOUNT="${ACCOUNT:-944269089535}"
@@ -21,7 +24,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="${REPO:-$(cd "$HERE/../../../.." && pwd)}"
 
 aws_ec2() { aws ec2 --region "$REGION" "$@"; }
-aws_s3api() { aws s3api --region "$REGION" "$@"; }
+aws_s3api() { aws s3api --region "$S3_REGION" "$@"; }
 
 echo "== S3 bucket s3://$BUCKET =="
 if aws_s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1; then
@@ -29,11 +32,11 @@ if aws_s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1; then
 else
     # us-east-1 is the one region where create-bucket must NOT get a
     # LocationConstraint; this whole stack is us-east-1, so no branch is needed.
-    if [ "$REGION" = "us-east-1" ]; then
+    if [ "$S3_REGION" = "us-east-1" ]; then
         aws_s3api create-bucket --bucket "$BUCKET"
     else
         aws_s3api create-bucket --bucket "$BUCKET" \
-            --create-bucket-configuration "LocationConstraint=$REGION"
+            --create-bucket-configuration "LocationConstraint=$S3_REGION"
     fi
     echo "   created"
 fi
@@ -147,7 +150,7 @@ stage() {
         return 0
     fi
     echo "   uploading $key ($size bytes)"
-    aws s3 cp --region "$REGION" "$local_path" "s3://$BUCKET/$key" --only-show-errors
+    aws s3 cp --region "$S3_REGION" "$local_path" "s3://$BUCKET/$key" --only-show-errors
 }
 stage "$REPO/weights/dinov3_convnext_base_pretrain_lvd1689m-801f2ba9.pth"
 stage "$REPO/weights/decoder_best.pt"
