@@ -61,6 +61,11 @@ REPO_DIR="$NVME/crop-counter"
 # The Ubuntu 24.04 DLAMI ships PyTorch in a venv at /opt/pytorch, with CUDA
 # INSIDE it (/opt/pytorch/cuda) -- so the venv must be active or there is no GPU.
 # The conda branch is the older (22.04) DLAMI layout, kept as a fallback.
+# The DLAMI's activate script reads $LD_LIBRARY_PATH unguarded, which under
+# `set -u` is a fatal "unbound variable" -- seen on the first launch. Give it a
+# value and relax -u around every environment activation below.
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
+set +u
 if [ -f /opt/pytorch/bin/activate ]; then
     # shellcheck disable=SC1091
     . /opt/pytorch/bin/activate
@@ -92,6 +97,7 @@ else
     # shellcheck disable=SC1091
     . "$NVME/venv/bin/activate"
 fi
+set -u
 echo "python: $(command -v python) $(python -V 2>&1)"
 # Fatal on purpose: a box without torch+CUDA must die here, in the bootstrap
 # log, not 20 minutes later inside run_all.sh.
