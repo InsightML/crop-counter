@@ -304,6 +304,17 @@ def parse_coco_detection(
         x, y, w, h = (float(v) for v in bbox)
         if w <= 0 or h <= 0:
             continue
+        # Clip to the image and drop what does not survive. CFD carries boxes
+        # that sit entirely outside their frame (x >= width); Albumentations
+        # validates before it clips and raises on the zero-width result,
+        # which killed a 199k-image run 8 minutes in. Partial overlaps are
+        # clipped here exactly as ``clip=True`` would clip them later.
+        if record.width > 0 and record.height > 0:
+            x1, y1 = max(0.0, x), max(0.0, y)
+            x2, y2 = min(float(record.width), x + w), min(float(record.height), y + h)
+            if x2 - x1 <= 0 or y2 - y1 <= 0:
+                continue
+            x, y, w, h = x1, y1, x2 - x1, y2 - y1
         record.boxes.append(Box(x=x, y=y, w=w, h=h, label=label))
 
     return [records[i] for i in order]
