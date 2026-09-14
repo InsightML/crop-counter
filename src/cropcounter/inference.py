@@ -2,31 +2,34 @@
 
 Inference mirrors the validation path in :mod:`cropcounter.crop_dataset`:
 whole image, ImageNet normalisation, bottom-right pad to a multiple of 32,
-sigmoid, then ``heatmap.decode_peaks``. Source images are never modified.
+sigmoid, then ``heatmap.decode_peaks`` on every class channel
+(:func:`decode_classes`). Source images are never modified.
 
 The pieces are deliberately small and separate so a notebook can run them one
 at a time::
 
     recs  = records_from_folder("images/")
     ds    = CropTileDataset(recs, "images/", train=False, output_stride=cfg.output_stride)
-    prob  = predict_prob(model, ds[0]["image"], device)
-    pts, scores = decode_in_bounds(prob, recs[0].width, recs[0].height, tau=0.35,
-                                   k=cfg.k, nms_radius=cfg.nms_radius,
-                                   output_stride=cfg.output_stride)
+    prob  = predict_prob(model, ds[0]["image"], device)          # (1, C, h, w)
+    pts, scores, class_ids = decode_classes(
+        prob, cfg.class_names, tau=0.35, k=cfg.k, nms_radius=cfg.nms_radius,
+        output_stride=cfg.output_stride, width=recs[0].width, height=recs[0].height,
+    )
 """
 from __future__ import annotations
 
+import warnings
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
 from PIL import Image
 
-from .crop_dataset import ImageRecord
+from .crop_dataset import WILDCARD_CLASS, ImageRecord
 from .dinov3_pyramid import IMAGENET_MEAN, IMAGENET_STD
-from .heatmap import decode_peaks
+from .heatmap import decode_peaks, per_class_values
 
 #: Image extensions enumerated by :func:`records_from_folder`.
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
@@ -68,10 +71,11 @@ def predict_prob(
     image_tensor: torch.Tensor,
     device: Optional[torch.device] = None,
 ) -> torch.Tensor:
-    """Forward one padded image tensor (C, H, W) -> sigmoid prob map (1, 1, h, w).
+    """Forward one padded image tensor (3, H, W) -> sigmoid prob map (1, C, h, w).
 
-    Runs under ``torch.no_grad``; bf16 autocast is used on CUDA only. The map
-    comes back on the CPU as float32, ready for :func:`decode_in_bounds`.
+    C is the model's class count (1 for a single-class model). Runs under
+    ``torch.no_grad``; bf16 autocast is used on CUDA only. The map comes back
+    on the CPU as float32, ready for :func:`decode_classes`.
     """
     if device is None:
         device = next(model.parameters()).device
@@ -83,6 +87,84 @@ def predict_prob(
     return torch.sigmoid(logits.float()).cpu()
 
 
+def decode_classes(
+    prob: Union[torch.Tensor, np.ndarray],
+    class_names: Sequence[str],
+    tau: Union[float, Dict[str, float]] = 0.3,
+    k: Union[int, Dict[str, int]] = 3,
+    nms_radius: Union[float, Dict[str, float]] = 1.5,
+    output_stride: int = 4,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Decode a multi-channel probability map into class-tagged points.
+
+    Runs :func:`cropcounter.heatmap.decode_peaks` independently on every
+    channel with that class's ``tau`` / ``k`` / ``nms_radius`` (a scalar
+    applies to all classes; a ``{class_name: value}`` dict sets them per
+    class — see :func:`cropcounter.heatmap.per_class_values`). There is no
+    cross-class suppression: a peak in two channels yields two points.
+
+    Args:
+        prob: (1, C, h, w) or (C, h, w) probabilities, C = ``len(class_names)``.
+        class_names: channel names in channel order (``cfg.class_names``).
+        output_stride: grid-to-pixel scale of the map.
+        width, height: when given, drop points outside the original image
+            frame. Padding is bottom-right, so decoded coordinates are
+            already in the source frame; this only removes stray peaks in
+            the pad strip.
+
+    Returns:
+        ``(points, scores, class_ids)`` — points (N, 2) float32 (x, y) in
+        source pixels, scores (N,) float32, class_ids (N,) int64 channel
+        indices into ``class_names``. Points are grouped by class, scores
+        descending within each class.
+    """
+    if isinstance(prob, np.ndarray):
+        heat = torch.from_numpy(np.ascontiguousarray(prob))
+    else:
+        heat = prob
+    heat = heat.detach().float()
+    if heat.dim() == 3:
+        heat = heat.unsqueeze(0)
+    if heat.dim() != 4 or heat.shape[0] != 1:
+        raise ValueError(
+            f"decode_classes expects a single-image (1, C, h, w) map, got {tuple(heat.shape)}"
+        )
+    class_names = tuple(class_names)
+    if heat.shape[1] != len(class_names):
+        raise ValueError(
+            f"heatmap has {heat.shape[1]} channel(s) but {len(class_names)} class name(s) "
+            f"{list(class_names)} were given"
+        )
+    taus = per_class_values(tau, class_names)
+    ks = per_class_values(k, class_names)
+    radii = per_class_values(nms_radius, class_names)
+
+    points_per_class: List[np.ndarray] = []
+    scores_per_class: List[np.ndarray] = []
+    ids_per_class: List[np.ndarray] = []
+    for c in range(len(class_names)):
+        pts, sc = decode_peaks(
+            heat[:, c:c + 1], k=ks[c], tau=taus[c], nms_radius=radii[c], stride=output_stride
+        )
+        points_per_class.append(pts)
+        scores_per_class.append(sc)
+        ids_per_class.append(np.full(len(pts), c, dtype=np.int64))
+    points = np.concatenate(points_per_class).reshape(-1, 2).astype(np.float32)
+    scores = np.concatenate(scores_per_class).astype(np.float32)
+    class_ids = np.concatenate(ids_per_class).astype(np.int64)
+
+    if len(points) and (width is not None or height is not None):
+        keep = np.ones(len(points), dtype=bool)
+        if width is not None:
+            keep &= points[:, 0] < width
+        if height is not None:
+            keep &= points[:, 1] < height
+        points, scores, class_ids = points[keep], scores[keep], class_ids[keep]
+    return points, scores, class_ids
+
+
 def decode_in_bounds(
     prob: torch.Tensor,
     width: int,
@@ -92,20 +174,27 @@ def decode_in_bounds(
     nms_radius: float = 1.5,
     output_stride: int = 4,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Decode peaks and keep only points inside the original (width, height) frame.
+    """Decode a single-channel map and keep only points inside (width, height).
 
-    Padding is bottom-right, so decoded pixel coordinates are already in the
-    original image frame; this just drops any stray peak in the pad strip.
+    .. deprecated:: 0.2.0
+        Use :func:`decode_classes`, which handles any number of class
+        channels and also returns each point's class id. This wrapper decodes
+        a 1-channel map exactly as before and will be removed in a future
+        release.
 
     Returns:
         ``(points, scores)`` — points (N, 2) float32 (x, y) in source pixels.
     """
-    points, scores = decode_peaks(
-        prob, k=k, tau=tau, nms_radius=nms_radius, stride=output_stride
+    warnings.warn(
+        "decode_in_bounds is deprecated since cropcounter 0.2.0; use "
+        "decode_classes(prob, class_names, ...) which also returns class ids",
+        DeprecationWarning,
+        stacklevel=2,
     )
-    if len(points):
-        keep = (points[:, 0] < width) & (points[:, 1] < height)
-        points, scores = points[keep], scores[keep]
+    points, scores, _ = decode_classes(
+        prob, (WILDCARD_CLASS,), tau=tau, k=k, nms_radius=nms_radius,
+        output_stride=output_stride, width=width, height=height,
+    )
     return points, scores
 
 
@@ -123,6 +212,8 @@ def save_visualization(
     out_path: Path,
     output_stride: int = 4,
     max_side: int = VIZ_MAX_SIDE,
+    class_ids: Optional[np.ndarray] = None,
+    class_names: Optional[Sequence[str]] = None,
 ) -> Path:
     """Save a 2-panel figure (points overlay | predicted heatmap) via the OO API.
 
@@ -131,7 +222,13 @@ def save_visualization(
     balloon when saving thousands of large-image figures in a loop. The left
     panel is decimated to ``max_side`` so multi-megapixel images stay small in
     memory. No ``close()`` is needed: the figure owns its own Agg canvas.
+
+    Multiclass: pass the ``class_ids`` from :func:`decode_classes` (and
+    ``class_names`` for the legend) to colour the overlay per class; the
+    heatmap panel shows the per-cell maximum over class channels. Without
+    ``class_ids`` the overlay is a single colour, as for a 1-class model.
     """
+    from matplotlib import colormaps
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
 
@@ -143,18 +240,33 @@ def save_visualization(
     step = max(1, int(round(max(height, width) / max_side)))
     disp = img[::step, ::step]
     grid_h, grid_w = grid_hw(width, height, output_stride)
-    heat = prob[0, 0, :grid_h, :grid_w].numpy()
+    n_channels = int(prob.shape[1])
+    heat = prob[0, :, :grid_h, :grid_w].max(dim=0).values.numpy()
 
     fig = Figure(figsize=(15, 7))
     FigureCanvasAgg(fig)
     ax0, ax1 = fig.subplots(1, 2)
     ax0.imshow(disp)
-    if len(points):
+    if len(points) and class_ids is None:
         ax0.scatter(points[:, 0] / step, points[:, 1] / step, s=45, facecolors="none",
                     edgecolors="red", linewidths=1.0)
+    elif len(points):
+        ids = np.asarray(class_ids, dtype=np.int64).reshape(-1)
+        names = list(class_names) if class_names is not None else [
+            str(c) for c in range(int(ids.max()) + 1)
+        ]
+        palette = colormaps["tab10"]
+        for c, name in enumerate(names):
+            mask = ids == c
+            if not mask.any():
+                continue
+            ax0.scatter(points[mask, 0] / step, points[mask, 1] / step, s=45,
+                        facecolors="none", edgecolors=[palette(c % 10)], linewidths=1.0,
+                        label=f"{name}: {int(mask.sum())}")
+        ax0.legend(loc="upper right", fontsize=8)
     ax0.set_title(f"{out_path.stem[:60]}\npredicted count: {len(points)}", fontsize=9)
     ax1.imshow(heat, cmap="hot", vmin=0, vmax=1)
-    ax1.set_title("predicted heatmap")
+    ax1.set_title("predicted heatmap" + (" (max over classes)" if n_channels > 1 else ""))
     for ax in (ax0, ax1):
         ax.axis("off")
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -170,10 +282,13 @@ def write_cvat_xml(
 
     Args:
         image_preds: dicts with ``name``, ``width``, ``height``, ``points``
-            (N, 2) and ``scores`` (N,); an optional ``label`` key overrides the
-            default for that image.
+            (N, 2) and ``scores`` (N,). An optional ``labels`` key gives one
+            label per point (e.g. ``[cfg.class_names[c] for c in class_ids]``
+            for a multiclass model); an optional ``label`` key overrides the
+            default for every point of that image.
         out_path: XML file to write.
-        label: point label written when a record does not carry its own.
+        label: point label written when a record carries neither ``labels``
+            nor ``label``.
 
     The result re-imports into CVAT and round-trips through
     :func:`cropcounter.parse_cvat_1_1`: scores are written as an integer
@@ -187,10 +302,16 @@ def write_cvat_xml(
     for i, rec in enumerate(image_preds):
         img_el = ET.SubElement(root, "image", id=str(i), name=str(rec["name"]),
                                width=str(rec["width"]), height=str(rec["height"]))
-        for (x, y), s in zip(rec["points"], rec["scores"]):
+        point_labels: Optional[Sequence[Any]] = rec.get("labels")
+        if point_labels is not None and len(point_labels) != len(rec["points"]):
+            raise ValueError(
+                f"{rec['name']}: {len(point_labels)} labels for {len(rec['points'])} points"
+            )
+        for j, ((x, y), s) in enumerate(zip(rec["points"], rec["scores"])):
             xc = min(max(float(x), 0.0), rec["width"] - 1)
             yc = min(max(float(y), 0.0), rec["height"] - 1)
-            pts_el = ET.SubElement(img_el, "points", label=str(rec.get("label", label)),
+            point_label = point_labels[j] if point_labels is not None else rec.get("label", label)
+            pts_el = ET.SubElement(img_el, "points", label=str(point_label),
                                    occluded="0", source="auto", points=f"{xc:.2f},{yc:.2f}")
             ET.SubElement(pts_el, "attribute", name="Confidence").text = str(
                 int(round(float(s) * 100))

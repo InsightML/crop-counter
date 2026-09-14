@@ -1,7 +1,7 @@
 """PyTorch library for the DINOv3 ConvNeXt pyramid-decoder crop emergence counter."""
 from importlib import import_module
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"
 
 #: Public attribute -> the submodule that defines it. Resolved lazily (PEP 562)
 #: rather than imported here, for two reasons:
@@ -18,6 +18,7 @@ __version__ = "0.1.2"
 _LAZY_ATTRS = {
     # data
     "COUNTED_LABELS": "crop_dataset",
+    "WILDCARD_CLASS": "crop_dataset",
     "CropTileDataset": "crop_dataset",
     "ImageRecord": "crop_dataset",
     "Point": "crop_dataset",
@@ -33,13 +34,16 @@ _LAZY_ATTRS = {
     "PyramidDecoder": "dinov3_pyramid",
     # heatmap + loss + metrics
     "decode_peaks": "heatmap",
+    "per_class_values": "heatmap",
     "point_nms": "heatmap",
+    "render_class_targets": "heatmap",
     "render_targets": "heatmap",
     "penalty_reduced_focal_loss": "losses",
     "evaluate": "metrics",
     "match_points": "metrics",
     "sweep_tau": "metrics",
     # inference
+    "decode_classes": "inference",
     "decode_in_bounds": "inference",
     "predict_prob": "inference",
     "records_from_folder": "inference",
@@ -66,10 +70,17 @@ def __getattr__(name: str):
     module_name = _LAZY_ATTRS.get(name)
     if module_name is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    value = getattr(import_module(f".{module_name}", __name__), name)
-    # Cache as a package attribute. This also re-binds ``cropcounter.train`` to
-    # the train *function*, which importing the same-named submodule shadows.
+    module = import_module(f".{module_name}", __name__)
+    value = getattr(module, name)
+    # Cache as a package attribute.
     globals()[name] = value
+    # Importing a submodule also binds it on the package, which shadows a
+    # lazy attribute of the same name: after ``TrainConfig`` pulls in the
+    # ``train`` submodule, a plain ``cropcounter.train`` would be that module,
+    # not the function, and ``__getattr__`` would never run for it. Re-bind
+    # such names to the attribute the table promises.
+    if module_name in _LAZY_ATTRS and _LAZY_ATTRS[module_name] == module_name:
+        globals()[module_name] = getattr(module, module_name)
     return value
 
 
@@ -97,18 +108,20 @@ __all__ = [
     # model
     "DinoV3Backbone", "PyramidDecoder", "CropCounter",
     # heatmap + loss + metrics
-    "decode_peaks", "point_nms", "render_targets",
+    "decode_peaks", "point_nms", "render_targets", "render_class_targets",
+    "per_class_values",
     "penalty_reduced_focal_loss",
     "evaluate", "match_points", "sweep_tau",
     # training
     "TrainConfig", "build_loaders", "build_model", "load_checkpoint",
     "resolve_device", "train",
     # data
-    "COUNTED_LABELS", "ImageRecord", "Point", "CropTileDataset", "collate_val",
+    "COUNTED_LABELS", "WILDCARD_CLASS", "ImageRecord", "Point", "CropTileDataset",
+    "collate_val",
     "load_records", "load_splits",
     "parse_cvat_1_1", "parse_coco_keypoints", "parse_datumaro",
     # inference
-    "records_from_folder", "predict_prob", "decode_in_bounds",
+    "records_from_folder", "predict_prob", "decode_classes", "decode_in_bounds",
     "save_visualization", "write_cvat_xml",
     # backbone weights
     "WEIGHT_FILES", "DINOV3_DOWNLOAD_URL", "BackboneWeightsNotFound",

@@ -23,11 +23,13 @@ with visible individual plants), `cropcounter`:
 
 1. Runs it through a **frozen** DINOv3 ConvNeXt backbone to get four
    multi-scale feature maps.
-2. Fuses them with a small trainable **pyramid decoder** into a single
-   stride-4 probability heatmap — one peak per plant.
-3. **Decodes** that heatmap into discrete `(x, y)` points via a local-max
-   test, a score threshold, and greedy non-maximum suppression.
-4. Returns the points and their count.
+2. Fuses them with a small trainable **pyramid decoder** into a stride-4
+   probability heatmap — one peak per plant, one channel per class (a
+   single-class model has one channel).
+3. **Decodes** each channel into discrete `(x, y)` points via a local-max
+   test, a score threshold, and greedy non-maximum suppression, with
+   per-class thresholds if you want them.
+4. Returns the points, their class, and the count per class.
 
 Only the decoder trains (~3.4M parameters); the backbone's ImageNet/web-scale
 pretraining does the heavy lifting on texture and shape, so the counter
@@ -44,10 +46,10 @@ flowchart LR
     B --> C3["stage map<br/>stride 16"]
     B --> C4["stage map<br/>stride 32"]
     C1 & C2 & C3 & C4 --> D["Pyramid decoder<br/>(1x1 laterals + top-down<br/>concat/conv ladder, trainable)"]
-    D --> E["1-channel logits<br/>stride 4"]
-    E --> F["sigmoid<br/>peak heatmap"]
-    F --> G["local-max decode<br/>(k=3, tau, point-NMS)"]
-    G --> H["points (x, y) + count"]
+    D --> E["C-channel logits<br/>(one per class), stride 4"]
+    E --> F["sigmoid<br/>peak heatmap per class"]
+    F --> G["local-max decode per channel<br/>(k, tau, point-NMS)"]
+    G --> H["points (x, y) + class + count"]
 ```
 
 - **Backbone — DINOv3 ConvNeXt, frozen.** Chosen over a ViT backbone because
@@ -75,7 +77,9 @@ flowchart LR
 - **Metrics** report counting quality (MAE/RMSE/bias) and localization
   quality (Hungarian-matched precision/recall/F1 within a pixel radius)
   separately — a good count with poor localization means compensating
-  errors, not a good model. See [`metrics.py`](src/cropcounter/metrics.py).
+  errors, not a good model. Every metric is computed per class and the
+  headline numbers are the macro mean over classes. See
+  [`metrics.py`](src/cropcounter/metrics.py).
 
 ## Install
 
@@ -165,7 +169,7 @@ backbone from the section above and count the bundled sample images:
 ```python
 import torch
 from cropcounter import (
-    CropTileDataset, load_checkpoint, records_from_folder, predict_prob, decode_in_bounds,
+    CropTileDataset, load_checkpoint, records_from_folder, predict_prob, decode_classes,
 )
 
 device = torch.device("cpu")  # or "mps" / "cuda"
@@ -177,13 +181,18 @@ val_ds = CropTileDataset(records, "examples/data/val/images", train=False,
                           output_stride=cfg.output_stride)
 
 for record, item in zip(records, val_ds):
-    prob = predict_prob(model, item["image"], device)
-    points, scores = decode_in_bounds(
-        prob, record.width, record.height, tau=0.35,
+    prob = predict_prob(model, item["image"], device)          # (1, C, h, w)
+    points, scores, class_ids = decode_classes(
+        prob, cfg.class_names, tau=0.35,
         k=cfg.k, nms_radius=cfg.nms_radius, output_stride=cfg.output_stride,
+        width=record.width, height=record.height,
     )
     print(f"{record.name}: {len(points)} plants")
 ```
+
+`class_ids` indexes `cfg.class_names` — all zeros for this single-class
+checkpoint; see [Classes and multiclass counting](#classes-and-multiclass-counting)
+for models with more than one.
 
 `tau` = 0.35 is deliberate: the checkpoint's stored config keeps the
 training-time default of 0.3, but 0.35 is the swept/calibrated threshold for
@@ -236,8 +245,10 @@ annotation tool exports doesn't affect anything downstream.
 
 The built-in default (`fmt="cvat"`). Minimal spec — one `<image>` per
 picture, one `<points>` element per plant (or per group of plants sharing a
-label), with `Wheat` / `Volunteer` as this repo's two counted labels
-(pass your own `labels=(...)` tuple, or `labels=None` to keep every label):
+label), with `Wheat` / `Volunteer` as this repo's two counted labels. Which
+labels are counted, and into which output class, is the `classes` entry of
+the training config — see
+[Classes and multiclass counting](#classes-and-multiclass-counting):
 
 ```xml
 <annotations>
@@ -283,6 +294,49 @@ records = load_records("path/to/annotations.json", fmt="coco")
 Datumaro can read converts into the same `ImageRecord`/`Point` objects —
 useful for label formats without a built-in loader here (Pascal VOC,
 LabelMe, YOLO, etc.).
+
+## Classes and multiclass counting
+
+One model can locate and count several classes at once: the decoder emits
+one heatmap channel per class, each channel is decoded independently, and
+the metrics are reported per class. The mapping from annotation labels to
+output classes lives in the training config:
+
+```json
+"classes": {
+  "Wheat": ["Wheat", "Volunteer"],
+  "Beans": ["Beans"]
+},
+"tau": {"Wheat": 0.35, "Beans": 0.25},
+"k": 3,
+"nms_radius": 1.5
+```
+
+- `classes` maps each **class name** (an output channel, in dict order) to
+  the point **labels** merged into it, and doubles as the label filter —
+  labels not listed anywhere are dropped. The shipped wheat counter is the
+  single-class `{"Wheat": ["Wheat", "Volunteer"]}` (the default); `null`
+  keeps every label in one channel named `All`.
+- `tau`, `k` and `nms_radius` take one value for every class, or a
+  `{class_name: value}` dict. Calibrate per class with `sweep_tau` — the
+  channels decode independently, so each class's best `tau` can be read off
+  its own `per_class` entry in a single pass (`notebooks/training.ipynb`
+  does this).
+- `evaluate` / `sweep_tau` return the usual `count_mae`, `precision`,
+  `recall`, `f1`, … as the **macro mean over classes** (identical to the
+  single-class numbers when there is one class) plus a `per_class` dict with
+  the same metrics for each class. `history.json` gains a `val_per_class`
+  series and the epoch log prints a per-class line.
+- `decode_classes` returns `(points, scores, class_ids)`; `write_cvat_xml`
+  accepts a per-point `labels` list and `save_visualization` a
+  `class_ids` / `class_names` pair for class-coloured overlays.
+
+Backward compatibility: every pre-0.2.0 checkpoint and config loads and
+behaves exactly as before — the 1-channel head is the `n_classes=1` case,
+and a config with the old `labels` tuple (or neither key) resolves to the
+equivalent single-class `classes`. `labels` and `decode_in_bounds` still
+work but emit a `DeprecationWarning` and will be removed in a future
+release; `to_dict` / saved configs always write the `classes` form.
 
 ## Results
 

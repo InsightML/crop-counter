@@ -18,7 +18,7 @@
   "exclude_label_statuses": [],
   "num_workers": 4,
   "batch_size": 8,
-  "labels": ["Tassel"],
+  "classes": {"Tassel": ["Tassel"]},
   "epochs": 40,
   "lr": 0.001,
   "weight_decay": 0.0001,
