@@ -319,6 +319,28 @@ def read_split(out: Path, split: str) -> dict:
     return json.loads((out / split / "annotations.json").read_text())
 
 
+def test_subset_renumbers_annotation_ids_as_ints(master, tmp_path):
+    """pycocotools stores annotation ids in a float array while matching, so a
+    source whose master ids are strings (the salmon-camera clips are) crashes
+    COCOeval unless the subset writer renumbers. The master id survives as
+    ``cfd_id``."""
+    doc = json.loads(json.dumps(master))
+    for ann in doc["annotations"]:
+        if str(ann["image_id"]).startswith("torsi"):
+            ann["id"] = f"{ann['image_id']}_{ann['id']}"
+    path = tmp_path / "master_str_ids.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    out = tmp_path / "ints"
+    cfd.run_subset(path, out, sources=["torsi", "brackish_dataset"], progress=False)
+    for split in ("train", "val"):
+        anns = read_split(out, split)["annotations"]
+        ids = [a["id"] for a in anns]
+        assert all(isinstance(i, int) for i in ids)
+        assert len(set(ids)) == len(ids)
+        assert any(isinstance(a["cfd_id"], str) for a in anns)   # the torsi originals
+        assert all("cfd_id" in a for a in anns)
+
+
 def test_subset_honours_is_train_and_never_resplits(master_json, tmp_path):
     out = tmp_path / "all"
     summary = run_subset(master_json, out, sources=["all"])
@@ -587,10 +609,42 @@ def test_fetch_survives_a_failing_download(master_json, tmp_path, monkeypatch):
     monkeypatch.setattr(cfd, "_download_bytes", boom)
     result = cfd.fetch_subset(out, max_side=512, workers=2, progress=False)
     assert result["totals"]["failed"] == 12 and result["totals"]["downloaded"] == 0
-    # failed images keep their native geometry rather than being silently scaled
-    for image in read_split(out, "train")["images"]:
-        assert image["cfd_scale"] == 1.0
-        assert (image["width"], image["height"]) == (TORSI_W, TORSI_H)
+    # Failed images are left out of the live annotations (with their boxes):
+    # the loader raises on a listed image it cannot open, and a few CFD files
+    # are 404 on every mirror. The native document keeps them for a retry.
+    for split in ("train", "val"):
+        live = read_split(out, split)
+        assert live["images"] == [] and live["annotations"] == []
+        native = json.loads((out / split / "annotations.native.json").read_text())
+        assert len(native["images"]) > 0
+        for image in native["images"]:
+            assert (image["width"], image["height"]) == (TORSI_W, TORSI_H)
+
+
+def test_fetch_drops_only_the_failed_images(master_json, tmp_path, monkeypatch, fake_download):
+    """One 404 removes that image and its boxes; every other image is intact."""
+    out = tmp_path / "one_bad"
+    cfd.run_subset(master_json, out, sources=["torsi"], progress=False)
+    native = json.loads((out / "train" / "annotations.native.json").read_text()) \
+        if (out / "train" / "annotations.native.json").exists() \
+        else read_split(out, "train")
+    victim = native["images"][0]
+    real = cfd._download_bytes
+
+    def flaky(url, retries=3, timeout=30.0):
+        if victim["file_name"].rsplit("/", 1)[-1] in url:
+            raise RuntimeError("HTTP Error 404: Not Found")
+        return real(url, retries=retries, timeout=timeout)
+
+    monkeypatch.setattr(cfd, "_download_bytes", flaky)
+    result = cfd.fetch_subset(out, max_side=512, workers=2, progress=False)
+    assert result["totals"]["failed"] == 1
+    live = read_split(out, "train")
+    assert victim["id"] not in {img["id"] for img in live["images"]}
+    assert all(ann["image_id"] != victim["id"] for ann in live["annotations"])
+    assert len(live["images"]) == len(native["images"]) - 1
+    n_victim_boxes = sum(1 for a in native["annotations"] if a["image_id"] == victim["id"])
+    assert len(live["annotations"]) == len(native["annotations"]) - n_victim_boxes
 
 
 def test_image_url_percent_encodes_awkward_filenames():

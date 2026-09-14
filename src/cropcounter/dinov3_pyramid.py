@@ -1,7 +1,9 @@
-"""Frozen DINOv3 ConvNeXt backbone + pyramid decoder for counting and detection.
+"""DINOv3 ConvNeXt backbone + pyramid decoder for counting and detection.
 
-The backbone stays frozen and permanently in eval mode; only the decoder
-trains.
+The backbone is frozen by default — held in eval mode, with only the decoder
+training. ``trainable=True`` unfreezes the whole trunk for fine-tuning; the
+layer-wise learning rates that go with it come from
+:meth:`DinoV3Backbone.param_groups`.
 
 Two tasks share one fusion trunk, selected by ``task``:
 
@@ -56,6 +58,35 @@ OFFSET_BIAS_INIT = 0.5
 #: and where they do run they are slower than fp16.
 BF16_MIN_CUDA_MAJOR = 8
 
+#: Depth buckets the ConvNeXt trunk is split into for layer-wise LR decay:
+#: the stem, then one per stage (each carrying the downsample layer that feeds
+#: it), with the final norm riding with the last stage. Depth 0 is the stem
+#: (slowest), depth 4 the top (fastest).
+BACKBONE_DEPTHS = 5
+
+
+def convnext_param_depth(name: str) -> int:
+    """Which layer-wise-decay bucket a ConvNeXt parameter belongs to.
+
+    ``name`` is a key from the hub model's ``named_parameters()``. The stem
+    (``downsample_layers.0``) is depth 0; stage ``i`` is depth ``i + 1``, and
+    ``downsample_layers.i`` for ``i >= 1`` rides with the stage it feeds
+    (also ``i + 1``) so a stage and its input projection share a learning
+    rate. The final ``norm`` — which the hub also aliases as ``norms[3]`` —
+    sits at the top. Anything else raises ``KeyError`` rather than being
+    guessed into a bucket, so a hub layout change fails loudly.
+    """
+    head, _, rest = name.partition(".")
+    if head in ("norm", "norms"):
+        return BACKBONE_DEPTHS - 1
+    index = rest.split(".")[0]
+    if head in ("downsample_layers", "stages") and index.isdigit():
+        block = int(index)
+        depth = 0 if (head == "downsample_layers" and block == 0) else block + 1
+        if depth < BACKBONE_DEPTHS:
+            return depth
+    raise KeyError(f"unrecognised ConvNeXt parameter name {name!r}")
+
 
 def amp_dtype(device: torch.device) -> Optional[torch.dtype]:
     """The mixed-precision dtype to autocast to on ``device``, or None for fp32.
@@ -91,15 +122,25 @@ def autocast_context(device: torch.device, enabled: bool = True) -> ContextManag
 
 
 class DinoV3Backbone(nn.Module):
-    """Frozen DINOv3 ConvNeXt feature extractor exposing the 4 stage maps.
+    """DINOv3 ConvNeXt feature extractor exposing the 4 stage maps, frozen by default.
 
     Never pass ``patch_size`` to the hub constructor: it makes
     ``get_intermediate_layers`` bilinearly resample every stage to a
     ViT-like stride-16 grid, destroying the stride-4 skip the decoder
     relies on. The hub default (None) keeps native stage resolutions.
+
+    Args:
+        trainable: ``True`` unfreezes the whole trunk for fine-tuning. The
+            default ``False`` is the shipped behaviour: no gradients, eval
+            mode always, no graph built in ``forward``.
     """
 
-    def __init__(self, size: str = "base", weights_dir: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        size: str = "base",
+        weights_dir: Optional[Path] = None,
+        trainable: bool = False,
+    ) -> None:
         super().__init__()
         if size not in WEIGHT_FILES:
             raise ValueError(f"backbone size must be one of {sorted(WEIGHT_FILES)}, got {size!r}")
@@ -107,6 +148,7 @@ class DinoV3Backbone(nn.Module):
         weights_path = resolve_backbone_weights(size, weights_dir)
 
         self.size = size
+        self.trainable = trainable
         self.stage_channels: Tuple[int, ...] = STAGE_CHANNELS[size]
         self.model = torch.hub.load(
             repo_or_dir="facebookresearch/dinov3",
@@ -117,18 +159,70 @@ class DinoV3Backbone(nn.Module):
             # torch prompts on stdin for confirmation and blocks CI/nohup runs.
             trust_repo=True,
         )
-        self.model.requires_grad_(False)
-        self.model.eval()
+        self.model.requires_grad_(self.trainable)
+        if not self.trainable:
+            self.model.eval()
 
     def train(self, mode: bool = True) -> "DinoV3Backbone":
-        """Keep the frozen backbone in eval mode regardless of parent state."""
+        """Follow the parent's train/eval mode, unless the trunk is frozen.
+
+        For this trunk the mode changes gradient flow and nothing else: DropPath
+        is 0.0 and the only normalisation is LayerNorm, which has no running
+        statistics to update. A frozen backbone is pinned to eval regardless of
+        what the parent module is doing.
+        """
         super().train(mode)
-        self.model.eval()
+        if not self.trainable:
+            self.model.eval()
         return self
 
+    def param_groups(
+        self,
+        base_lr: float,
+        layer_decay: float = 0.8,
+        weight_decay: float = 0.05,
+    ) -> List[Dict[str, object]]:
+        """Optimizer parameter groups for the trunk, with layer-wise LR decay.
+
+        Two conventions, both standard for fine-tuning a ConvNeXt. First,
+        earlier layers learn more slowly: a parameter at ``depth`` gets
+        ``base_lr * layer_decay ** (BACKBONE_DEPTHS - 1 - depth)``, so the top
+        stage runs at ``base_lr`` and the stem at ``layer_decay ** 4`` of it.
+        Second, 1-D tensors — norm weights, biases, LayerScale gammas — are
+        never weight-decayed. That gives at most ``2 * BACKBONE_DEPTHS``
+        groups, ordered by depth then decay-before-no-decay. Buckets are keyed
+        off ``named_parameters()``, which deduplicates by identity: the hub
+        model aliases its final norm as both ``norm`` and ``norms[3]``, and a
+        module walk would hand AdamW the same tensor twice.
+        """
+        if not self.trainable:
+            raise RuntimeError(
+                "param_groups() called on a frozen backbone; build it with "
+                "trainable=True before asking for optimizer groups"
+            )
+        buckets: Dict[Tuple[int, bool], List[nn.Parameter]] = {}
+        for name, param in self.model.named_parameters():
+            key = (convnext_param_depth(name), param.ndim <= 1)
+            buckets.setdefault(key, []).append(param)
+
+        groups: List[Dict[str, object]] = []
+        for depth, no_decay in sorted(buckets):
+            groups.append({
+                "params": buckets[(depth, no_decay)],
+                "lr": base_lr * layer_decay ** (BACKBONE_DEPTHS - 1 - depth),
+                "weight_decay": 0.0 if no_decay else weight_decay,
+                "name": f"backbone.d{depth}." + ("no_decay" if no_decay else "decay"),
+            })
+        return groups
+
     def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
-        """Return the four stage maps (NCHW) at strides 4/8/16/32."""
-        with torch.no_grad():
+        """Return the four stage maps (NCHW) at strides 4/8/16/32.
+
+        A frozen trunk never builds a graph. A trainable one builds one only
+        when the caller has grad enabled, so validation and inference under
+        ``torch.no_grad()`` stay allocation-cheap either way.
+        """
+        with torch.set_grad_enabled(self.trainable and torch.is_grad_enabled()):
             feats = self.model.get_intermediate_layers(x, n=[0, 1, 2, 3], reshape=True)
         return list(feats)
 
@@ -257,7 +351,7 @@ class PyramidDecoder(nn.Module):
 
 
 class CropCounter(nn.Module):
-    """Frozen DINOv3 ConvNeXt backbone + trainable pyramid decoder.
+    """DINOv3 ConvNeXt backbone (frozen by default) + trainable pyramid decoder.
 
     forward(x): (B, 3, H, W) normalised RGB, H and W divisible by 32 ->
     (B, 1, H/s, W/s) logits for ``task="point"``, or a
@@ -272,9 +366,10 @@ class CropCounter(nn.Module):
         c_dec: int = 192,
         output_stride: int = 4,
         task: str = "point",
+        backbone_trainable: bool = False,
     ) -> None:
         super().__init__()
-        self.backbone = DinoV3Backbone(backbone_size, weights_dir)
+        self.backbone = DinoV3Backbone(backbone_size, weights_dir, backbone_trainable)
         self.decoder = PyramidDecoder(
             self.backbone.stage_channels, c_dec=c_dec, output_stride=output_stride,
             task=task,
@@ -286,5 +381,9 @@ class CropCounter(nn.Module):
         return self.decoder(self.backbone(x))
 
     def trainable_parameters(self) -> List[nn.Parameter]:
-        """Decoder parameters — the only ones the optimizer should see."""
+        """Every parameter the optimizer should see and gradient clipping cover.
+
+        The decoder alone with a frozen trunk; the decoder plus the whole
+        backbone when it was built with ``backbone_trainable=True``.
+        """
         return [p for p in self.parameters() if p.requires_grad]

@@ -56,6 +56,12 @@ portal = ["requests>=2.31", "python-dotenv>=1.0"]
 # of the core deps: the point counter never needs it, and pycocotools builds
 # from source on platforms without a wheel.
 detection = ["pycocotools>=2.0", "ijson>=3.2"]
+# Rebuilding the gated DINOv3 backbone checkpoints from timm's ungated re-host
+# (examples/FishDetection/scripts/convert_timm_dinov3.py). Needed only to RUN that
+# script -- never to load the .pth files it produces, which are plain Meta-format
+# state dicts. timm is also the reference model --verify compares our converted
+# trunk's stage activations against.
+convert = ["timm>=1.0.19", "huggingface_hub>=0.26", "safetensors>=0.4"]
 # Local development. nbconvert + ipykernel are here so the notebooks in
 # notebooks/ can be run — and executed headlessly as a check — from a plain
 # `pip install -e ".[dev]"`, not merely stripped of outputs by nbstripout.

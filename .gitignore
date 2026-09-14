@@ -2,6 +2,9 @@
 # DINOv3 backbone checkpoints: gated download from Meta, user-supplied.
 *.pth
 weights/dinov3_*
+# timm's re-hosted DINOv3 files, downloaded by
+# examples/FishDetection/scripts/convert_timm_dinov3.py.
+weights/timm/
 
 # Datasets (repo-root only; examples/data IS committed).
 /data/
@@ -83,3 +86,6 @@ Thumbs.db
 
 # SDD process notes (build logs, review diffs) -- never shipped.
 /.superpowers/
+
+# EC2 instance id written by examples/FishDetection/scripts/aws/launch.sh.
+.aws-instance-id

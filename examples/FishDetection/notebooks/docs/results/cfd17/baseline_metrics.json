@@ -1,0 +1,38 @@
+{
+ "rfdetr_nano_640": {
+  "ap": 0.5876100884149136,
+  "ap50": 0.830889647318761,
+  "ap75": 0.6478935259925706,
+  "ar100": 0.691571543871786,
+  "seconds_per_image": 0.01714206965476255,
+  "n_images": 36632,
+  "n_detections": 3663200,
+  "checkpoint": "/opt/dlami/nvme/crop-counter/weights/baselines/rfdetr_nano_640.pth",
+  "threshold": 0.001,
+  "device": "cuda",
+  "side": 640,
+  "max_dets": 100,
+  "limit": null,
+  "predictions": "/opt/dlami/nvme/results/rfdetr_nano_640/predictions.json",
+  "gflops": 97.3,
+  "gflops_input": "640x640"
+ },
+ "rfdetr_medium_1024": {
+  "ap": 0.6019870642641278,
+  "ap50": 0.840405672988282,
+  "ap75": 0.661252779021345,
+  "ar100": 0.7011203351397055,
+  "seconds_per_image": 0.019746075507776528,
+  "n_images": 36632,
+  "n_detections": 3663200,
+  "checkpoint": "/opt/dlami/nvme/crop-counter/weights/baselines/rfdetr_medium_1024.pth",
+  "threshold": 0.001,
+  "device": "cuda",
+  "side": 1024,
+  "max_dets": 100,
+  "limit": null,
+  "predictions": "/opt/dlami/nvme/results/rfdetr_medium_1024/predictions.json",
+  "gflops": 331.1,
+  "gflops_input": "1024x1024"
+ }
+}

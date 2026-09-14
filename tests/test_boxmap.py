@@ -433,6 +433,34 @@ def test_parse_coco_detection_round_trip(tmp_path):
     assert second.source_dataset == "cfd" and second.is_train is False
 
 
+def test_parse_coco_detection_clips_to_the_image_and_drops_outside_boxes(tmp_path):
+    """Boxes entirely outside their frame (a real CFD case: x >= width) are
+    dropped; boxes that overlap the edge are clipped. Albumentations validates
+    before it clips and raises on a zero-width survivor."""
+    import json
+
+    doc = {
+        "images": [{"id": "f", "file_name": "f.jpg", "width": 100, "height": 50}],
+        "categories": [{"id": 1, "name": "fish"}],
+        "annotations": [
+            {"id": 1, "image_id": "f", "category_id": 1, "bbox": [100.0, 10.0, 20.0, 10.0]},
+            {"id": 2, "image_id": "f", "category_id": 1, "bbox": [90.0, 45.0, 20.0, 20.0]},
+            {"id": 3, "image_id": "f", "category_id": 1, "bbox": [-5.0, -5.0, 10.0, 10.0]},
+            {"id": 4, "image_id": "f", "category_id": 1, "bbox": [10.0, 10.0, 5.0, 5.0]},
+            {"id": 5, "image_id": "f", "category_id": 1, "bbox": [0.0, 60.0, 5.0, 5.0]},
+        ],
+    }
+    path = tmp_path / "edge.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    (record,) = parse_coco_detection(path)
+    kept = [(b.x, b.y, b.w, b.h) for b in record.boxes]
+    assert kept == [
+        (90.0, 45.0, 10.0, 5.0),   # clipped to the bottom-right corner
+        (0.0, 0.0, 5.0, 5.0),      # clipped to the top-left corner
+        (10.0, 10.0, 5.0, 5.0),    # untouched
+    ]
+
+
 def test_parse_coco_detection_accepts_string_ids_and_empty_markers(tmp_path):
     """Real CFD metadata: image ids are filename strings, annotation ids are
     int for some sources and str for others, and "reviewed, nothing here" is

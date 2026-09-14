@@ -136,3 +136,135 @@ Rules applied before narrative: rule 7 — the kill criterion **does not fire** 
 | τ calibrated per checkpoint, NMS compared, best-vs-last argued (Liam's tuning convention) | ✅ § Tuning |
 | Inference FLOPs measured for both models | ✅ 477 (ours, 1024×576) / 97.3 (Nano, 640²) GFLOPs |
 | Branch is `poc/detection-head`, merged with `origin/main` (Liam's PRs #1–#5) at `fe33845`; deliverable = PR #6 | ✅ |
+
+---
+
+# Unfrozen trunk on capped all-17 CFD — frozen twin, `.609` headline, forgetting number (2026-09-14)
+
+**Question.** The Brackish memo above ranked "they fine-tune the backbone, we froze it" as the first of four causes of the 0.20 AP gap to RF-DETR. This section measures that one cause in isolation: the same box head, the same data pipeline, the same 8-epoch recipe, run twice on a capped all-17-source CFD subset — once with the DINOv3 ConvNeXt-B trunk frozen (the product path) and once with the whole trunk trainable (an in-domain upper bound, not the product path) — with the released RF-DETR checkpoints re-scored on the identical val frames through the identical scorer. Beside it, the number the product decision needs: what fine-tuning the trunk on fish costs the shipped wheat decoder.
+
+Code: branch `poc/detection-head-unfrozen`, PR #8 into `poc/detection-head`; the box ran `afb56ac` (data pulled by `a9342cf`, identical data code). Result files: `results/cfd17/` (results.csv, results_summary.json, baseline_metrics.json, histories, configs, wheat_forgetting.json); curves in `images/cfd17_*_curves.png`.
+
+## Rules written before the numbers (restated, plus one exception)
+
+1. **The `.609` headline is a written exception to rule 1 of the Brackish memo**, at Freddie's explicit request. The README number is quoted *with its own caveat beside it*: "It's not straightforward to publish the splits we use (hopefully we will eventually, but we haven't done this yet), so you should not make anything of the absolute AP values." and "This column is only useful to compare these models to each other and to future model releases." The like-for-like rows — RF-DETR Medium-1024 (the checkpoint behind the `.609` row: the `2026.05.13` release shipped `…medium-1024-2026.03.24-checkpoint_11`, and the `2026.07.06` re-release repackaged the same weights, per its release notes) and Nano-640, re-scored on *our* val frames — sit directly beneath.
+2. **Baseline contamination favours them.** RF-DETR was trained on the full CFD train split; our val frames are CFD's published `is_train=false` frames, but their clip-level split is unpublished, so leakage in their favour cannot be excluded and is not corrected for.
+3. **Trainable parameters and total FLOPs are both reported.** Unfreezing adds 87.57 M trainable parameters and adds **zero** inference FLOPs — same trunk, same head, 477 GFLOPs per 1024×576 frame (measured on the Brackish run; unchanged by construction).
+4. **One seed (0) = a go/no-go read**, not an estimate with error bars. Epoch-to-epoch movement on the Brackish run was ±0.02–0.06 F1; treat differences inside that band as noise.
+5. **No regulariser against forgetting was used**: no L2-SP, no distillation, no EMA, no LoRA, no last-stage-only variant. The unfrozen run is the unconstrained upper bound; the low-forgetting options are named in the interpretation, not run.
+6. **Resume caveat.** Epochs ≥ 2 reseed to `seed + epoch − 1`, so a spot-reclaimed run resumes reproducibly but not bit-identically to the uninterrupted counterfactual (persistent loader workers seed once). Neither run here was interrupted.
+
+## Setup
+
+| | |
+|---|---|
+| Data | `cfd subset --sources all --train-cap 20000 --val-cap 4000 --seed 0` (sequence-grouped, published `is_train`): 161,975 train / 36,659 val frames selected; **161,911 / 36,632 on disk** after 91 files that are 404 on every LILA mirror (coralscapes) or unreadable PNGs (six fathomnet) were left out of the live annotations; 49,961 (30.9 %) train frames are empty; 222,152 train boxes, of which 44 lie entirely outside their frame and are dropped by the loader; long side 1024 |
+| Recipe (both runs) | task box, natural augment (no vflip / rot90), scale jitter 0.25, 20 % negative tiles, tile 768 × 1 per frame, batch 8 (20,238 steps/epoch), 8 epochs, seed 0, AdamW decoder lr 1e-3 / wd 1e-4, warmup 2 epochs linear 0.1→1 then cosine, grad-norm clip 1.0, focal α 2 β 4 + L1 on log-size and offset (weights 1.0), bf16 autocast, checkpoint on **val AP50** (last epoch reported beside), `ap_tau` 0.01, `match_iou` 0.5, 12 loader workers |
+| Unfrozen only | whole ConvNeXt-B trainable: 87.57 M params in 10 AdamW groups, layer-wise LR decay 0.8 over 5 depths (stem, stages 0–3, final norm) → backbone lr 2e-5 × {0.41, 0.51, 0.64, 0.80, 1.0} stem→top, weight decay 0.05 on ≥ 2-D tensors, none on norms / biases / LayerScale γ; same warmup + cosine, every group from its own base lr |
+| Hardware | p5.4xlarge spot (1× H100 80 GB, 16 vCPU, 3.5 TB NVMe), **us-east-2** (us-east-1 had no p5 spot capacity in any AZ that day), DLAMI PyTorch 2.12 (Ubuntu 24.04) `ami-01529c037984b51e9`, torch 2.12.1+cu130; code shipped as a `git archive` tarball via S3 (no GitHub credential on the box); SSM only |
+| Wall time | frozen: 25.6 min train + 12.3–13.0 min val per epoch (13.2 it/s, 98 % GPU, 4.7 GB) → 5.3 h; unfrozen: 63.6 min train + 12.3–13.0 min val per epoch (5.31 it/s = 0.40× frozen, 96 % GPU, 18 GB) → 10.3 h; fetch of 198,634 frames 25 min; both RF-DETR passes + scorer 1.1 h; pipeline total 993 min |
+| Cost | box up 17.4 h for this pipeline at $2.44–2.63/h spot ≈ **$43–46**, plus a 12-minute first box lost to a bootstrap bug (≈ $0.5); S3 < $2 |
+| Baselines | RF-DETR Nano-640 (`cfd-rf-detr-nano-640-2026.02.02.cp-011`, 30.14 M params, 97.3 GFLOPs @640², 17 ms/frame on the H100 incl. preprocessing) and Medium-1024 (`cfd-rf-detr-medium-1024-2026.03.24.cp-011`, 33.69 M params, 331.1 GFLOPs @1024², 20 ms/frame), `predict(threshold=0.001)`, top-100 per frame, scored on the same 36,632 frames through `det_metrics.coco_eval` |
+| τ calibration | per Liam: count-MAE argmin with the F1-argmax τ beside it, on `predictions.json` (best epoch) and `predictions_last.json`, NMS off, sweep 0.05–0.75 |
+
+## Headline
+
+**We score 0.520 AP with the trunk unfrozen and 0.397 AP with it frozen; they score .609.** The `.609` is the README's `cfd-2026.05.13-rf-detr-medium-1024` on *their* unpublished split — rule 1 says why that number is not comparable. Re-scored on our 36,632 val frames the same checkpoint gets **0.602**, which is the row to read against ours.
+
+## Like-for-like (36,632 val frames, one scorer)
+
+| system | trainable M | GFLOPs / frame (input) | AP | AP50 | AP75 | AR100 | F1 @ τ | count MAE @ τ |
+|---|---|---|---|---|---|---|---|---|
+| frozen twin, best AP50 (epoch 7) | 3.58 | 477 (1024×576) | 0.397 | 0.697 | 0.408 | 0.543 | 0.698 (0.35) | 0.648 |
+| frozen twin, last (epoch 8) | 3.58 | 477 | 0.397 | 0.696 | 0.404 | 0.544 | 0.697 (0.35) | 0.650 |
+| **unfrozen, epoch 8 = best = last** | 91.15 | 477 | **0.520** | **0.786** | **0.577** | **0.615** | **0.790 (0.35)** | **0.435** |
+| RF-DETR Nano-640, re-scored | 30.14 (all) | 97.3 (640²) | 0.588 | 0.831 | 0.648 | 0.692 | 0.809 (0.40) | 0.386 |
+| RF-DETR Medium-1024, re-scored | 33.69 (all) | 331.1 (1024²) | 0.602 | 0.840 | 0.661 | 0.701 | 0.816 (0.40) | 0.381 |
+
+Unfreezing: **+0.124 AP, +0.089 AP50, +0.169 AP75, +0.072 AR100, +0.092 F1, −0.21 count MAE.** Gap to Medium-1024: AP 0.205 → 0.082, AP50 0.144 → 0.054, AP75 0.253 → 0.084. Detections per frame at `ap_tau` 0.01: 65 (frozen) vs 22.5 (unfrozen) — the fine-tuned heatmap is far sharper.
+
+## Per-source AP (17 sources)
+
+| source | n val | frozen (best) | unfrozen | Nano-640 | Medium-1024 | Δ unfreeze |
+|---|---|---|---|---|---|---|
+| brackish_dataset | 3127 | 0.323 | 0.438 | 0.492 | 0.511 | +0.115 |
+| coralscapes | 392 | 0.269 | 0.315 | 0.282 | 0.366 | +0.046 |
+| deep_vision | 305 | 0.324 | 0.646 | 0.779 | 0.772 | +0.322 |
+| deepfish | 53 | 0.504 | 0.643 | 0.727 | 0.710 | +0.139 |
+| f4k | 191 | 0.367 | 0.461 | 0.586 | 0.546 | +0.094 |
+| fathomnet | 3999 | 0.334 | 0.455 | 0.540 | 0.549 | +0.121 |
+| fishclef | 2604 | 0.440 | 0.506 | 0.575 | 0.584 | +0.066 |
+| kakadu | 4000 | 0.541 | 0.603 | 0.638 | 0.654 | +0.062 |
+| marine_detect | 4000 | 0.345 | 0.540 | 0.634 | 0.644 | +0.195 |
+| mit_river_herring | 4000 | 0.247 | 0.537 | 0.727 | 0.731 | +0.290 |
+| noaa_puget | 4000 | 0.122 | 0.148 | 0.116 | 0.160 | +0.026 |
+| project_natick | 215 | 0.139 | 0.308 | 0.239 | 0.206 | +0.169 |
+| roboflow_fish | 406 | 0.407 | 0.554 | 0.670 | 0.662 | +0.147 |
+| salmon_computer_vision | 4000 | 0.498 | 0.635 | 0.880 | 0.870 | +0.137 |
+| torsi | 202 | 0.355 | 0.536 | 0.595 | 0.594 | +0.181 |
+| viame_fishtrack | 4000 | 0.260 | 0.295 | 0.309 | 0.314 | +0.035 |
+| zebrafish | 1138 | 0.756 | 0.907 | 0.909 | 0.953 | +0.151 |
+
+AP50 per source is in `results/cfd17/results.csv` (scope column). The unfrozen head beats both RF-DETRs on project_natick and beats Nano on coralscapes and noaa_puget; RF-DETR keeps its largest leads on salmon (0.88 vs 0.64), river herring (0.73 vs 0.54) and deep_vision (0.77 vs 0.65).
+
+## τ calibration (Table 2, per Liam)
+
+| system | MAE-argmin τ | MAE | F1 there | F1-argmax τ | F1 max | agree |
+|---|---|---|---|---|---|---|
+| frozen twin, best (ep 7) | 0.35 | 0.648 | 0.698 | 0.35 | 0.698 | yes |
+| frozen twin, last (ep 8) | 0.35 | 0.650 | 0.697 | 0.35 | 0.697 | yes |
+| unfrozen (ep 8) | 0.35 | 0.435 | 0.790 | 0.35 | 0.790 | yes |
+| RF-DETR Nano-640 | 0.40 | 0.386 | 0.809 | 0.45 | 0.810 | no (Δ F1 0.001) |
+| RF-DETR Medium-1024 | 0.40 | 0.381 | 0.816 | 0.40 | 0.816 | yes |
+
+F1 vs τ is flat to ±0.01 over 0.30–0.40 for all three of ours; the Brackish-tuned 0.35 transfers. NMS was off (box_nms_iou null) for every row.
+
+## Training curves (`images/cfd17_frozen_s0_curves.png`, `images/cfd17_unfrozen_s0_curves.png`)
+
+| epoch | frozen: train / val loss | AP50 | AP | unfrozen: train / val loss | AP50 | AP |
+|---|---|---|---|---|---|---|
+| 1 | 1.846 / 1.491 | 0.616 | 0.276 | 1.420 / **1.126** | 0.720 | 0.389 |
+| 2 | 1.663 / 1.442 | 0.645 | 0.326 | 1.199 / 1.146 | 0.719 | 0.417 |
+| 3 | 1.497 / 1.458 | 0.665 | 0.327 | 1.096 / 1.369 | 0.722 | 0.397 |
+| 4 | 1.342 / 1.387 | 0.678 | 0.345 | 0.948 / 1.467 | 0.735 | 0.418 |
+| 5 | 1.233 / 1.356 | 0.682 | 0.370 | 0.832 / 1.517 | 0.745 | 0.437 |
+| 6 | 1.137 / 1.386 | 0.680 | 0.376 | 0.724 / 1.485 | 0.779 | 0.499 |
+| 7 | 1.073 / 1.339 | **0.697** | 0.397 | 0.636 / 1.347 | 0.780 | 0.504 |
+| 8 | 1.025 / **1.294** | 0.696 | 0.397 | 0.583 / 1.330 | **0.786** | **0.520** |
+
+## The forgetting number (wheat, `data/val`, 122 images, MPS fp32, τ 0.35 / k 3 / nms 1.5 / match 24 px)
+
+| trunk under `weights/decoder_best.pt` | MAE | RMSE | bias | P | R | F1 |
+|---|---|---|---|---|---|---|
+| pretrained DINOv3 (the shipped model) | 8.484 | 11.873 | −1.713 | 0.741 | 0.717 | 0.729 |
+| fish-fine-tuned (unfrozen `best.pt`, epoch 8) | 14.705 | 19.943 | −0.197 | 0.629 | 0.626 | 0.628 |
+| **delta** | **+6.22 (+73 %)** | +8.07 | +1.52 | −0.113 | −0.090 | **−0.101** |
+
+The baseline row reproduced the published wheat numbers from the pretrained trunk (MAE off by 4.4e-7, F1 by 4.6e-7) before the fine-tuned row was read (`wheat_forgetting.py --strict`). The frozen twin's `best.pt` carries no trunk (verified: no `backbone` key) and reproduces the baseline by construction.
+
+## Interpretation
+
+- **Unfreezing is the dominant cause, and it is not the whole gap.** +0.124 AP on the same head, data and recipe closes about 60 % of the AP gap to the fine-tuned Medium-1024 (0.205 → 0.082) and 62 % of the AP50 gap. The remaining 0.05–0.08 is what the other three ranked causes (the 0.22 M wh/off stem with log-L1 and no IoU term, training scale, decoder topology) are worth together — on one seed.
+- **What moved is geometry more than detection.** AP75 gained 0.169 against AP50's 0.089, and the frozen twin's AP75 (0.41) was its weakest number in the Brackish run too. A trunk that can move gives the size/offset branch features it can regress from; the frozen features find fish nearly as well as they ever will (AP50 0.70 vs 0.79) but do not localise their extent.
+- **The gain is largest where the frozen features were weakest** — river herring (+0.29), deep_vision (+0.32), marine_detect (+0.20), project_natick (+0.17): murky, low-contrast, video-frame sources far from web-image statistics. Where the frozen trunk was already competitive (kakadu +0.06, coralscapes +0.05, viame +0.03, noaa_puget +0.03) fine-tuning bought little. This is the domain-shift signature: the pretrained features are good on clear water and poor on turbid video, and fine-tuning fixes the second.
+- **Val loss picked the wrong checkpoint a third time.** The unfrozen val loss rose from 1.13 at epoch 1 to 1.52 at epoch 5 while AP rose monotonically; on `val_loss` this run would have shipped epoch 1 (AP 0.389) instead of epoch 8 (0.520). The AP50 selector introduced in this PR did its job. Rising focal val loss with rising AP is over-confidence of the heatmap, not over-fitting in the ranking sense — the 22.5 detections per frame vs 65 says the same.
+- **Forgetting is severe.** The fish-tuned trunk costs the wheat decoder 10 F1 points and 73 % more count error. One shared trunk cannot serve wheat and fish once it is fine-tuned on fish without a regulariser (L2-SP to the pretrained weights, distillation from the frozen trunk, EMA, LoRA or last-stage-only fine-tuning — none run here) or without serving a trunk per domain. That is a product decision, not a modelling result.
+- **Compute.** Training the trunk costs 2.5× the per-epoch time (63.6 vs 25.6 min) and a 1.09 GB resumable checkpoint; inference is unchanged at 477 GFLOPs. Against RF-DETR the picture is now: unfrozen, 0.08 AP below Medium at 1.44× its FLOPs and 0.07 below Nano at 4.9× Nano's FLOPs; frozen, 0.19–0.21 AP below both at the same FLOPs.
+
+## Verdict (sized to one seed)
+
+Fine-tuning the trunk is worth +0.12 AP in-domain and is the single largest lever among the four ranked causes; the remaining 0.08 AP to a fully fine-tuned detector is the head and its loss. The frozen-trunk premise survives as a *label-efficiency / shared-trunk* story (AP50 0.70 on 17 sources from 3.6 M trainable parameters), not as an accuracy story. Whether the product path unfreezes is Freddie's call, and the forgetting number is the cost side of it.
+
+## Verification ledger
+
+| check | result |
+|---|---|
+| Unit tests / lint on the branch | 216 → 268 at the run's commit (`afb56ac`), 325 after the sweep tooling; ruff clean |
+| Frozen default byte-identical | wheat regression on MPS fp32 reproduced MAE 8.483607 / F1 0.728848 (to 4e-7) through the new `load_checkpoint`; every shipped config loads `strict=True`; frozen checkpoints carry no `backbone` key |
+| Real-data smoke before the cloud, all 17 sources (30/10 caps) | found two bugs Brackish never could: string annotation ids (salmon-camera source; pycocotools needs numeric) and boxes lying entirely outside their frame (44 in the full train set; Albumentations raises). Both fixed with tests |
+| Fetch | 198,543 / 198,634 (91 dropped, 404 on all three LILA mirrors or unreadable), coverage gate 100 % / 99.9 % |
+| Resume | exercised on the smoke (epoch 1 → 2 with optimizer state); not needed on the box (no spot reclaim) |
+| Scorer | RF-DETR AP on the 168-frame smoke identical before and after the top-100 cap (COCOeval maxDets); per-source rows sum to 36,632 |
+| MLflow | both runs logged to experiment `crop-counter_CFD17` at `https://mlflow.insightml.io` from the box (`log_mlflow` step, run log) |
+| Baseline .609 provenance | release `2026.05.13` shipped `…medium-1024-2026.03.24-checkpoint_11`; `2026.07.06` re-release: "Model weights are not changing with this release" (release notes) |
+| One crash | the first launch died 8 min into epoch 1 on the outside-frame box; fixed, code re-shipped, run re-driven in place (data on the NVMe kept) |
