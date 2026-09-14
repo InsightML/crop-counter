@@ -121,6 +121,13 @@ for f in dinov3_convnext_base_pretrain_lvd1689m-801f2ba9.pth decoder_best.pt; do
     [ -f "$REPO_DIR/weights/$f" ] || \
         aws s3 cp --region "$S3_REGION" "$S3_URI/inputs/$f" "$REPO_DIR/weights/$f" --only-show-errors
 done
+# Optional trunks for the size sweep (converted from timm re-hosts; see
+# convert_timm_dinov3.py). Absent on S3 = not part of this run, not an error.
+for f in dinov3_convnext_tiny_pretrain_lvd1689m-21b726bb.pth dinov3_convnext_small_pretrain_lvd1689m-296db49d.pth; do
+    [ -f "$REPO_DIR/weights/$f" ] || \
+        aws s3 cp --region "$S3_REGION" "$S3_URI/inputs/$f" "$REPO_DIR/weights/$f" --only-show-errors \
+        || echo "no $f on S3 — skipping"
+done
 META=community_fish_detection_dataset.json.zip
 [ -f "$REPO_DIR/data/cfd/$META" ] || \
     aws s3 cp --region "$S3_REGION" "$S3_URI/inputs/$META" "$REPO_DIR/data/cfd/$META" --only-show-errors

@@ -42,6 +42,13 @@ MLFLOW_EXPERIMENT="${MLFLOW_EXPERIMENT:-crop-counter_CFD17}"
 
 FROZEN_RUN="${FROZEN_RUN:-cfd17_frozen_s0}"
 UNFROZEN_RUN="${UNFROZEN_RUN:-cfd17_unfrozen_s0}"
+# The training runs, as "name=config" pairs in order. Default = the frozen twin
+# then the unfrozen run; the trunk-size sweep passes its own list. Every run is
+# guarded by its .done marker, so a list can be extended and relaunched.
+RUNS="${RUNS:-$FROZEN_RUN=$CONFIG_FROZEN $UNFROZEN_RUN=$CONFIG_UNFROZEN}"
+# Optional: backbone sizes to measure with measure_trunk.py after training
+# (params, GFLOPs at 1024x576, img/s, peak GPU memory) -> results/trunk_<size>.json
+MEASURE_SIZES="${MEASURE_SIZES:-}"
 
 mkdir -p "$RUNS_DIR" "$RESULTS_DIR" "$DATA_ROOT" "$(dirname "$CFD_META")"
 
@@ -219,8 +226,22 @@ run_train() {
     sync_once
 }
 
-run_train "$FROZEN_RUN" "$CONFIG_FROZEN"
-run_train "$UNFROZEN_RUN" "$CONFIG_UNFROZEN"
+for pair in $RUNS; do
+    run_train "${pair%%=*}" "${pair#*=}"
+done
+
+# --- 6b. trunk measurements (optional) --------------------------------------- #
+for size in $MEASURE_SIZES; do
+    out="$RESULTS_DIR/trunk_${size}.json"
+    if [ -f "$out" ]; then
+        echo "[skip] measure_trunk $size ($out present)"
+        continue
+    fi
+    echo "[run ] measure_trunk $size"
+    "$PY" "$HERE/measure_trunk.py" --size "$size" --device "$DEVICE" --side 1024x576 \
+        --batch 1 --iters 50 --weights-dir "$WEIGHTS_DIR" --out "$out" \
+        || echo "[warn] measure_trunk $size failed"
+done
 
 # --- 7. released RF-DETR baselines ------------------------------------------ #
 run_baseline() {
@@ -263,7 +284,8 @@ echo "[run ] evaluate_cfd17"
 
 # --- 9. MLflow -------------------------------------------------------------- #
 if [ -n "$MLFLOW_TRACKING_URI" ]; then
-    for name in "$FROZEN_RUN" "$UNFROZEN_RUN"; do
+    for pair in $RUNS; do
+        name="${pair%%=*}"
         [ -d "$RUNS_DIR/$name" ] || continue
         echo "[run ] log_mlflow $name"
         # MLflow is telemetry, never the gate: a tracking outage must not fail the run.
