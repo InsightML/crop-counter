@@ -7,6 +7,7 @@
 #   ./launch.sh --resume     pull runs/ + results/ back from S3 and carry on
 #   ./launch.sh --dry-run    permissions check only, nothing is created
 #   ./launch.sh --force      launch even though .aws-instance-id names a live box
+#   ./launch.sh --on-demand  no spot market options (full rate; use when spot is exhausted)
 set -euo pipefail
 
 REGION="${REGION:-us-east-1}"
@@ -36,11 +37,13 @@ ID_FILE="$REPO/.aws-instance-id"
 RESUME=0
 DRY_RUN=""
 FORCE=0
+ON_DEMAND=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --resume) RESUME=1 ;;
         --dry-run) DRY_RUN="--dry-run" ;;
         --force) FORCE=1 ;;
+        --on-demand) ON_DEMAND=1 ;;   # spot capacity exhausted; costs the full rate
         -h|--help) awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -116,7 +119,6 @@ RUN_ARGS=(
     --image-id "$AMI_ID"
     --instance-type "$INSTANCE_TYPE"
     --count 1
-    --instance-market-options 'MarketType=spot,SpotOptions={SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}'
     --iam-instance-profile "Arn=$PROFILE_ARN"
     --security-group-ids "$SG_ID"
     --block-device-mappings "[{\"DeviceName\":\"$ROOT_DEVICE\",\"Ebs\":{\"VolumeSize\":$ROOT_GB,\"VolumeType\":\"gp3\",\"DeleteOnTermination\":true}}]"
@@ -127,6 +129,11 @@ RUN_ARGS=(
     "ResourceType=instance,Tags=[{Key=Name,Value=$NAME_TAG},{Key=project,Value=$PROJECT_TAG}]"
     "ResourceType=volume,Tags=[{Key=Name,Value=$NAME_TAG},{Key=project,Value=$PROJECT_TAG}]"
 )
+if [ "$ON_DEMAND" = "1" ]; then
+    echo "on-demand: no spot market options — full rate applies" >&2
+else
+    RUN_ARGS+=(--instance-market-options 'MarketType=spot,SpotOptions={SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}')
+fi
 [ -n "$SUBNET_ID" ] && RUN_ARGS+=(--subnet-id "$SUBNET_ID")
 [ -n "$DRY_RUN" ] && RUN_ARGS+=("$DRY_RUN")
 
