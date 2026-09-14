@@ -1,0 +1,85 @@
+{
+  "arms": {
+    "baseline": {
+      "count_mae": 8.48360655737705,
+      "count_rmse": 11.872616240468764,
+      "count_bias": -1.7131147540983607,
+      "precision": 0.7412724306688417,
+      "recall": 0.7168323079350055,
+      "f1": 0.7288475419039216,
+      "n_images": 122,
+      "val_loss": 1.0775010456315806
+    },
+    "tuned": {
+      "count_mae": 14.704918032786885,
+      "count_rmse": 19.943362427585594,
+      "count_bias": -0.19672131147540983,
+      "precision": 0.6288202692003168,
+      "recall": 0.6264395014986591,
+      "f1": 0.6276276276276276,
+      "n_images": 122,
+      "val_loss": 1.4046355031552862
+    }
+  },
+  "delta": {
+    "count_mae": 6.221311475409836,
+    "count_rmse": 8.07074618711683,
+    "count_bias": 1.5163934426229508,
+    "precision": -0.11245216146852499,
+    "recall": -0.0903928064363464,
+    "f1": -0.10121991427629407
+  },
+  "baseline_check": {
+    "expect_mae": 8.483607,
+    "expect_f1": 0.728848,
+    "mae_abs_error": 4.4262294984775963e-07,
+    "f1_abs_error": 4.5809607840396893e-07,
+    "tolerance": 0.001,
+    "reproduced": true
+  },
+  "decode": {
+    "tau": 0.35,
+    "k": 3,
+    "nms_radius": 1.5,
+    "output_stride": 4,
+    "match_radius_px": 24.0,
+    "autocast": "off (fp32)"
+  },
+  "provenance": {
+    "decoder": {
+      "path": "weights/decoder_best.pt",
+      "keys": [
+        "config",
+        "decoder"
+      ],
+      "epoch": null,
+      "best_epoch": null,
+      "best_metric": null,
+      "run_name": null,
+      "has_backbone": false
+    },
+    "tuned": {
+      "path": "runs/cfd17_unfrozen_s0/best.pt",
+      "keys": [
+        "backbone",
+        "best_epoch",
+        "best_metric",
+        "config",
+        "decoder",
+        "epoch",
+        "history"
+      ],
+      "epoch": 8,
+      "best_epoch": 8,
+      "best_metric": 0.7859490683468248,
+      "run_name": "cfd17_unfrozen_s0",
+      "has_backbone": true
+    },
+    "data_root": "data",
+    "annotation_format": "cvat",
+    "device": "mps",
+    "torch": "2.13.0",
+    "git_rev": "1fc1417db6995d963a689dbd9e314baf6c6fcce6"
+  },
+  "markdown": "| arm | MAE | RMSE | bias | precision | recall | F1 |\n|---|---|---|---|---|---|---|\n| baseline | 8.4836 | 11.8726 | -1.7131 | 0.7413 | 0.7168 | 0.7288 |\n| tuned | 14.7049 | 19.9434 | -0.1967 | 0.6288 | 0.6264 | 0.6276 |\n| **delta (tuned - baseline)** | +6.2213 | +8.0707 | +1.5164 | -0.1125 | -0.0904 | -0.1012 |"
+}
