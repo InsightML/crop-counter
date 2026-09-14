@@ -70,10 +70,17 @@ def __getattr__(name: str):
     module_name = _LAZY_ATTRS.get(name)
     if module_name is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    value = getattr(import_module(f".{module_name}", __name__), name)
-    # Cache as a package attribute. This also re-binds ``cropcounter.train`` to
-    # the train *function*, which importing the same-named submodule shadows.
+    module = import_module(f".{module_name}", __name__)
+    value = getattr(module, name)
+    # Cache as a package attribute.
     globals()[name] = value
+    # Importing a submodule also binds it on the package, which shadows a
+    # lazy attribute of the same name: after ``TrainConfig`` pulls in the
+    # ``train`` submodule, a plain ``cropcounter.train`` would be that module,
+    # not the function, and ``__getattr__`` would never run for it. Re-bind
+    # such names to the attribute the table promises.
+    if module_name in _LAZY_ATTRS and _LAZY_ATTRS[module_name] == module_name:
+        globals()[module_name] = getattr(module, module_name)
     return value
 
 
