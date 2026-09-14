@@ -26,7 +26,7 @@ import json
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import albumentations as A
 import cv2
@@ -36,13 +36,16 @@ from albumentations.pytorch import ToTensorV2
 from torch.utils.data import Dataset
 
 from .dinov3_pyramid import IMAGENET_MEAN, IMAGENET_STD
-from .heatmap import render_targets
+from .heatmap import render_class_targets
 
 # Point labels kept by default. These are the labels of the shipped wheat
 # example: volunteer wheat is counted together with drilled wheat (matching
 # previous model iterations). Pass ``labels=None`` to keep every point label,
 # or your own tuple for another crop.
 COUNTED_LABELS = ("Wheat", "Volunteer")
+
+#: Class name of the single channel when every label is kept (``classes=None``).
+WILDCARD_CLASS = "All"
 
 #: Sub-directory holding the image files inside a dataset (or split) folder.
 IMAGES_DIRNAME = "images"
@@ -373,16 +376,24 @@ class CropTileDataset(Dataset):
     crop at native resolution (``tiles_per_image`` draws per image per
     epoch), applies geometric + photometric augmentation with
     point-consistent keypoints, and renders the Gaussian heatmap target at
-    ``output_stride``. Images smaller than the tile are constant-padded —
-    never reflected, which would create mirror-image plants with no labels.
+    ``output_stride`` — one channel per class, ``(C, H, W)``. Images smaller
+    than the tile are constant-padded — never reflected, which would create
+    mirror-image plants with no labels.
 
     Val mode: the whole image, padded bottom-right to a multiple of 32,
-    with the raw ground-truth points for decode-based metrics. Use
-    ``collate_val`` and batch_size=1.
+    with the raw ground-truth points (and their class ids) for decode-based
+    metrics. Use ``collate_val`` and batch_size=1.
+
+    Classes: ``class_map`` maps a point label to its channel index (labels
+    absent from the map are dropped); ``None`` puts every point in channel 0
+    (a single-class model). ``n_classes`` defaults to the map's largest index
+    + 1 so a class with no points in a split still gets its (empty) channel.
 
     Pass ``transform`` to replace the default training augmentation pipeline;
-    it must be an albumentations Compose with ``KeypointParams(format="xy")``
-    and end in ``Normalize`` + ``ToTensorV2``.
+    it must be an albumentations Compose with
+    ``KeypointParams(format="xy", label_fields=["class_ids"])`` — the
+    ``label_fields`` entry is what keeps each point's class id aligned when a
+    crop drops keypoints — and end in ``Normalize`` + ``ToTensorV2``.
     """
 
     def __init__(
@@ -397,6 +408,8 @@ class CropTileDataset(Dataset):
         scale_jitter: float = 0.25,
         exclude_label_statuses: Sequence[str] = (),
         transform: Optional[A.Compose] = None,
+        class_map: Optional[Mapping[str, int]] = None,
+        n_classes: Optional[int] = None,
     ) -> None:
         self.records = list(records)
         self.images_dir = Path(images_dir)
@@ -406,14 +419,41 @@ class CropTileDataset(Dataset):
         self.sigma = sigma
         self.tiles_per_image = tiles_per_image
 
+        self.class_map: Optional[Dict[str, int]] = (
+            None if class_map is None else {str(k): int(v) for k, v in class_map.items()}
+        )
+        if n_classes is None:
+            n_classes = 1 if not self.class_map else max(self.class_map.values()) + 1
+        if n_classes < 1:
+            raise ValueError(f"n_classes must be >= 1, got {n_classes}")
+        if self.class_map and not all(0 <= c < n_classes for c in self.class_map.values()):
+            raise ValueError(
+                f"class_map channel indices {sorted(set(self.class_map.values()))} must lie "
+                f"in [0, {n_classes})"
+            )
+        self.n_classes = n_classes
+
+        # Per-record (N, 2) pixel points and their (N,) channel ids, filtered
+        # by QC status and (when a class map is given) by label.
         excluded = set(exclude_label_statuses)
-        self.points_px: List[np.ndarray] = [
-            np.array(
-                [[p.x, p.y] for p in rec.points if p.label_status not in excluded],
-                dtype=np.float32,
-            ).reshape(-1, 2)
-            for rec in self.records
-        ]
+        self.points_px: List[np.ndarray] = []
+        self.class_ids: List[np.ndarray] = []
+        for rec in self.records:
+            pts: List[List[float]] = []
+            ids: List[int] = []
+            for p in rec.points:
+                if p.label_status in excluded:
+                    continue
+                if self.class_map is None:
+                    cid = 0
+                else:
+                    cid = self.class_map.get(p.label)
+                    if cid is None:
+                        continue
+                pts.append([p.x, p.y])
+                ids.append(cid)
+            self.points_px.append(np.array(pts, dtype=np.float32).reshape(-1, 2))
+            self.class_ids.append(np.array(ids, dtype=np.int64).reshape(-1))
 
         if train:
             self.transform = transform or self.default_transform(tile, scale_jitter)
@@ -442,7 +482,11 @@ class CropTileDataset(Dataset):
                 A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
                 ToTensorV2(),
             ],
-            keypoint_params=A.KeypointParams(format="xy", remove_invisible=True),
+            # label_fields keeps class_ids aligned with the keypoints that
+            # survive RandomCrop's remove_invisible.
+            keypoint_params=A.KeypointParams(
+                format="xy", remove_invisible=True, label_fields=["class_ids"]
+            ),
         )
 
     def __len__(self) -> int:
@@ -463,14 +507,20 @@ class CropTileDataset(Dataset):
     def _get_train_tile(self, rec_idx: int) -> Tuple[torch.Tensor, torch.Tensor, int]:
         record = self.records[rec_idx]
         image = self._load_image(record)
-        out = self.transform(image=image, keypoints=self.points_px[rec_idx])
+        out = self.transform(
+            image=image,
+            keypoints=self.points_px[rec_idx],
+            class_ids=self.class_ids[rec_idx].tolist(),
+        )
         keypoints = np.asarray(out["keypoints"], dtype=np.float32).reshape(-1, 2)
+        class_ids = np.asarray(out["class_ids"], dtype=np.int64).reshape(-1)
 
         out_size = self.tile // self.output_stride
-        target = render_targets(
-            keypoints / self.output_stride, (out_size, out_size), self.sigma
+        target = render_class_targets(
+            keypoints / self.output_stride, class_ids, self.n_classes,
+            (out_size, out_size), self.sigma,
         )
-        return out["image"], torch.from_numpy(target).unsqueeze(0), len(keypoints)
+        return out["image"], torch.from_numpy(target), len(keypoints)
 
     def _get_val_image(self, index: int) -> Dict:
         record = self.records[index]
@@ -487,14 +537,16 @@ class CropTileDataset(Dataset):
         # point coordinates need no shift; the padded strip is all-background.
         out_h = image.shape[0] // self.output_stride
         out_w = image.shape[1] // self.output_stride
-        target = render_targets(
-            self.points_px[index] / self.output_stride, (out_h, out_w), self.sigma
+        target = render_class_targets(
+            self.points_px[index] / self.output_stride, self.class_ids[index],
+            self.n_classes, (out_h, out_w), self.sigma,
         )
 
         return {
             "image": torch.from_numpy(image.transpose(2, 0, 1).copy()),
-            "target": torch.from_numpy(target).unsqueeze(0),
+            "target": torch.from_numpy(target),
             "points": self.points_px[index],
+            "class_ids": self.class_ids[index],
             "name": record.name,
         }
 
@@ -508,5 +560,6 @@ def collate_val(batch: List[Dict]) -> Dict:
         "image": item["image"].unsqueeze(0),
         "target": item["target"].unsqueeze(0),
         "points": item["points"],
+        "class_ids": item["class_ids"],
         "name": item["name"],
     }

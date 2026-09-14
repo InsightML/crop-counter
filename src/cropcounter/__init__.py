@@ -1,7 +1,7 @@
 """PyTorch library for the DINOv3 ConvNeXt pyramid-decoder crop emergence counter."""
 from importlib import import_module
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"
 
 #: Public attribute -> the submodule that defines it. Resolved lazily (PEP 562)
 #: rather than imported here, for two reasons:
@@ -18,6 +18,7 @@ __version__ = "0.1.2"
 _LAZY_ATTRS = {
     # data
     "COUNTED_LABELS": "crop_dataset",
+    "WILDCARD_CLASS": "crop_dataset",
     "CropTileDataset": "crop_dataset",
     "ImageRecord": "crop_dataset",
     "Point": "crop_dataset",
@@ -33,13 +34,16 @@ _LAZY_ATTRS = {
     "PyramidDecoder": "dinov3_pyramid",
     # heatmap + loss + metrics
     "decode_peaks": "heatmap",
+    "per_class_values": "heatmap",
     "point_nms": "heatmap",
+    "render_class_targets": "heatmap",
     "render_targets": "heatmap",
     "penalty_reduced_focal_loss": "losses",
     "evaluate": "metrics",
     "match_points": "metrics",
     "sweep_tau": "metrics",
     # inference
+    "decode_classes": "inference",
     "decode_in_bounds": "inference",
     "predict_prob": "inference",
     "records_from_folder": "inference",
@@ -97,18 +101,20 @@ __all__ = [
     # model
     "DinoV3Backbone", "PyramidDecoder", "CropCounter",
     # heatmap + loss + metrics
-    "decode_peaks", "point_nms", "render_targets",
+    "decode_peaks", "point_nms", "render_targets", "render_class_targets",
+    "per_class_values",
     "penalty_reduced_focal_loss",
     "evaluate", "match_points", "sweep_tau",
     # training
     "TrainConfig", "build_loaders", "build_model", "load_checkpoint",
     "resolve_device", "train",
     # data
-    "COUNTED_LABELS", "ImageRecord", "Point", "CropTileDataset", "collate_val",
+    "COUNTED_LABELS", "WILDCARD_CLASS", "ImageRecord", "Point", "CropTileDataset",
+    "collate_val",
     "load_records", "load_splits",
     "parse_cvat_1_1", "parse_coco_keypoints", "parse_datumaro",
     # inference
-    "records_from_folder", "predict_prob", "decode_in_bounds",
+    "records_from_folder", "predict_prob", "decode_classes", "decode_in_bounds",
     "save_visualization", "write_cvat_xml",
     # backbone weights
     "WEIGHT_FILES", "DINOV3_DOWNLOAD_URL", "BackboneWeightsNotFound",

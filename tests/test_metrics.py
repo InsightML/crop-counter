@@ -134,8 +134,13 @@ def test_evaluate_on_toy_two_image_batch():
     )
 
     assert summary["n_images"] == 2
-    assert rows[0] == {"name": "img1", "n_gt": 2, "n_pred": 2, "tp": 2, "fp": 0, "fn": 0}
-    assert rows[1] == {"name": "img2", "n_gt": 3, "n_pred": 2, "tp": 2, "fp": 0, "fn": 1}
+    # Rows also carry a per-class breakdown (one wildcard class here); the
+    # per-image totals are what a single-class caller reads.
+    totals = ("name", "n_gt", "n_pred", "tp", "fp", "fn")
+    assert {k: rows[0][k] for k in totals} == {
+        "name": "img1", "n_gt": 2, "n_pred": 2, "tp": 2, "fp": 0, "fn": 0}
+    assert {k: rows[1][k] for k in totals} == {
+        "name": "img2", "n_gt": 3, "n_pred": 2, "tp": 2, "fp": 0, "fn": 1}
 
     # counts: [2, 3] gt vs [2, 2] pred -> err = [0, -1]
     assert summary["count_mae"] == pytest.approx(0.5)
