@@ -1,0 +1,25 @@
+{
+ "size": "tiny",
+ "device": "cuda",
+ "torch": "2.12.1+cu130",
+ "platform": "Linux-6.17.0-1020-aws-x86_64-with-glibc2.39",
+ "input": {
+  "batch": 1,
+  "width": 1024,
+  "height": 576
+ },
+ "autocast_dtype": "torch.bfloat16",
+ "params_total": 31307941,
+ "params_trainable": 3487813,
+ "params_backbone": 27820128,
+ "params_decoder": 3487813,
+ "gflops": 219.95569152,
+ "flops_device": "cuda",
+ "flops_error": null,
+ "iters": 50,
+ "warmup": 5,
+ "seconds": 0.4053123570001844,
+ "images_per_s": 123.3616472245312,
+ "ms_per_image": 8.106247140003688,
+ "peak_gpu_mem_mb": 394.29376
+}

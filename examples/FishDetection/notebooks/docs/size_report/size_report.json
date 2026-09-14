@@ -1,0 +1,1042 @@
+{
+ "generated_seconds": 5893.377039584011,
+ "annotations": "data/cfd17/val/annotations.json",
+ "n_images": 36632,
+ "sources": [
+  "brackish_dataset",
+  "coralscapes",
+  "deep_vision",
+  "deepfish",
+  "f4k",
+  "fathomnet",
+  "fishclef",
+  "kakadu",
+  "marine_detect",
+  "mit_river_herring",
+  "noaa_puget",
+  "project_natick",
+  "roboflow_fish",
+  "salmon_computer_vision",
+  "torsi",
+  "viame_fishtrack",
+  "zebrafish"
+ ],
+ "honesty_lines": [
+  "Baseline contamination favours RF-DETR: it was trained on the full CFD train split; our val frames are CFD's published is_train=false frames, but the clip-level split is unpublished.",
+  "One seed per size: differences inside the bootstrap CI are evaluation noise; differences outside it are still single-seed reads.",
+  "Trainable parameters and total FLOPs are both reported; a frozen trunk saves training compute, never inference compute."
+ ],
+ "bootstrap": {
+  "resamples": 1000,
+  "seed": 0,
+  "workers": 3,
+  "seconds_per_system": {
+   "cfd17_frozen_tiny_s0": 580.5013514160237,
+   "cfd17_frozen_small_s0": 537.7018317499897,
+   "cfd17_frozen_s0": 551.6532887089998,
+   "rfdetr_nano_640": 899.8387578749971,
+   "rfdetr_medium_1024": 3020.0511600000027
+  }
+ },
+ "systems": [
+  {
+   "name": "cfd17_frozen_tiny_s0",
+   "label": "Tiny",
+   "kind": "ours",
+   "trunk": "tiny",
+   "backbone_trainable": false,
+   "predictions": "runs/cfd17_frozen_tiny_s0/predictions.json",
+   "n_detections": 2537352,
+   "params_trainable": 3487813,
+   "params_total": 31307941,
+   "gflops": 219.95569152,
+   "gflops_input": "1024x576",
+   "images_per_s": 123.3616472245312,
+   "ms_per_image": 8.106247140003688,
+   "peak_gpu_mem_mb": 394.29376,
+   "ap": 0.3765973341912669,
+   "ap50": 0.6655649193598716,
+   "ap75": 0.38431024559634863,
+   "ar100": 0.5298589492294092,
+   "ap_recomputed": 0.3765973341912669,
+   "ap50_recomputed": 0.6655649193598716,
+   "tau": 0.35,
+   "tau_f1": 0.35,
+   "f1_at_tau": 0.673620103593396,
+   "mae_at_tau": 0.6940379995632234,
+   "per_source": {
+    "brackish_dataset": 0.3069587355389339,
+    "coralscapes": 0.24703646787723815,
+    "deep_vision": 0.3187113606103016,
+    "deepfish": 0.5051154599217268,
+    "f4k": 0.3561550395329391,
+    "fathomnet": 0.3003814026143425,
+    "fishclef": 0.38628864862640505,
+    "kakadu": 0.528839508062448,
+    "marine_detect": 0.3263215408566571,
+    "mit_river_herring": 0.27028045156079084,
+    "noaa_puget": 0.0865338508939016,
+    "project_natick": 0.12590811935198734,
+    "roboflow_fish": 0.3880160798143873,
+    "salmon_computer_vision": 0.41155626811577134,
+    "torsi": 0.3305999955260269,
+    "viame_fishtrack": 0.23849635481327697,
+    "zebrafish": 0.7687915821316327
+   },
+   "per_size": {
+    "small": 0.17649952931903595,
+    "medium": 0.3809084225878843,
+    "large": 0.4512702780712695
+   },
+   "bootstrap_ci": {
+    "ap": [
+     0.37176278660921486,
+     0.3814823481872341
+    ],
+    "ap50": [
+     0.6593145429399613,
+     0.6712062526672479
+    ],
+    "n_boot": 1000
+   }
+  },
+  {
+   "name": "cfd17_frozen_small_s0",
+   "label": "Small",
+   "kind": "ours",
+   "trunk": "small",
+   "backbone_trainable": false,
+   "predictions": "runs/cfd17_frozen_small_s0/predictions.json",
+   "n_detections": 2326710,
+   "params_trainable": 3487813,
+   "params_total": 52942501,
+   "gflops": 319.361089536,
+   "gflops_input": "1024x576",
+   "images_per_s": 78.92610115993658,
+   "ms_per_image": 12.670079800009262,
+   "peak_gpu_mem_mb": 482.781696,
+   "ap": 0.37240136791174755,
+   "ap50": 0.6796939142764071,
+   "ap75": 0.36502238580376734,
+   "ar100": 0.5203524347592144,
+   "ap_recomputed": 0.37240136791174755,
+   "ap50_recomputed": 0.6796939142764071,
+   "tau": 0.35,
+   "tau_f1": 0.35,
+   "f1_at_tau": 0.6795416171284131,
+   "mae_at_tau": 0.6738643808691854,
+   "per_source": {
+    "brackish_dataset": 0.28268198583628756,
+    "coralscapes": 0.21332153167734108,
+    "deep_vision": 0.2953925707484497,
+    "deepfish": 0.5188340231638829,
+    "f4k": 0.3178021261103605,
+    "fathomnet": 0.30969350395609707,
+    "fishclef": 0.40009464468173594,
+    "kakadu": 0.5093789230408622,
+    "marine_detect": 0.32672121483452543,
+    "mit_river_herring": 0.20381628939345248,
+    "noaa_puget": 0.07615473233567342,
+    "project_natick": 0.10345779504594389,
+    "roboflow_fish": 0.3632968262884951,
+    "salmon_computer_vision": 0.42461059976203774,
+    "torsi": 0.36826023341578434,
+    "viame_fishtrack": 0.25544144241621247,
+    "zebrafish": 0.7081970236093923
+   },
+   "per_size": {
+    "small": 0.15358428981440875,
+    "medium": 0.3741773591320209,
+    "large": 0.4492305590707367
+   },
+   "bootstrap_ci": {
+    "ap": [
+     0.367723901777948,
+     0.3765309566048366
+    ],
+    "ap50": [
+     0.6732398039846812,
+     0.6850005435448027
+    ],
+    "n_boot": 1000
+   }
+  },
+  {
+   "name": "cfd17_frozen_s0",
+   "label": "Base",
+   "kind": "ours",
+   "trunk": "base",
+   "backbone_trainable": false,
+   "predictions": "runs/cfd17_frozen_s0/predictions.json",
+   "n_detections": 2383739,
+   "params_trainable": 3579973,
+   "params_total": 91146437,
+   "gflops": 477.041393664,
+   "gflops_input": "1024x576",
+   "images_per_s": 75.68146165022223,
+   "ms_per_image": 13.213275460002478,
+   "peak_gpu_mem_mb": 640.147968,
+   "ap": 0.396597719628263,
+   "ap50": 0.6967285922778765,
+   "ap75": 0.40829633301813734,
+   "ar100": 0.543268380798647,
+   "ap_recomputed": 0.396597719628263,
+   "ap50_recomputed": 0.6967285922778765,
+   "tau": 0.35,
+   "tau_f1": 0.35,
+   "f1_at_tau": 0.6977818574296176,
+   "mae_at_tau": 0.6480945621314698,
+   "per_source": {
+    "brackish_dataset": 0.3233568584920317,
+    "coralscapes": 0.26918403331638824,
+    "deep_vision": 0.32432276355137835,
+    "deepfish": 0.5042127717215077,
+    "f4k": 0.36688647451881434,
+    "fathomnet": 0.33356394053177696,
+    "fishclef": 0.439520185876526,
+    "kakadu": 0.540749288234583,
+    "marine_detect": 0.34518747309377434,
+    "mit_river_herring": 0.24716696833806884,
+    "noaa_puget": 0.12225011508750923,
+    "project_natick": 0.13916408956379292,
+    "roboflow_fish": 0.40734183896033704,
+    "salmon_computer_vision": 0.498248739715947,
+    "torsi": 0.3553623615751921,
+    "viame_fishtrack": 0.26015935213065694,
+    "zebrafish": 0.7561043366898547
+   },
+   "per_size": {
+    "small": 0.1810664742216792,
+    "medium": 0.3961837754433831,
+    "large": 0.47820134834245337
+   },
+   "bootstrap_ci": {
+    "ap": [
+     0.3918633017032486,
+     0.4009137938892009
+    ],
+    "ap50": [
+     0.6908112569912269,
+     0.7022914350769524
+    ],
+    "n_boot": 1000
+   }
+  },
+  {
+   "name": "rfdetr_nano_640",
+   "label": "RF-DETR-Nano-640",
+   "kind": "baseline",
+   "trunk": null,
+   "backbone_trainable": null,
+   "predictions": "results_cfd17/rfdetr_nano_640/predictions.json",
+   "n_detections": 3663200,
+   "params_trainable": null,
+   "params_total": null,
+   "gflops": 97.3,
+   "gflops_input": "640x640",
+   "images_per_s": 58.33601310342196,
+   "ms_per_image": 17.142069654762548,
+   "peak_gpu_mem_mb": null,
+   "ap": 0.5876100884149136,
+   "ap50": 0.830889647318761,
+   "ap75": 0.6478935259925706,
+   "ar100": 0.691571543871786,
+   "ap_recomputed": 0.5876100884149136,
+   "ap50_recomputed": 0.830889647318761,
+   "tau": 0.4,
+   "tau_f1": 0.45,
+   "f1_at_tau": 0.8086801153888383,
+   "mae_at_tau": 0.38581022057217734,
+   "per_source": {
+    "brackish_dataset": 0.4922941815287557,
+    "coralscapes": 0.28162917738522475,
+    "deep_vision": 0.7788667792029871,
+    "deepfish": 0.7270186357982057,
+    "f4k": 0.5860859558816164,
+    "fathomnet": 0.5403552830713941,
+    "fishclef": 0.5747458001810453,
+    "kakadu": 0.638280948083954,
+    "marine_detect": 0.634118229725308,
+    "mit_river_herring": 0.7272901642061965,
+    "noaa_puget": 0.11556201820675366,
+    "project_natick": 0.23865296399737027,
+    "roboflow_fish": 0.6704765538988279,
+    "salmon_computer_vision": 0.8796133277539969,
+    "torsi": 0.5950814483032383,
+    "viame_fishtrack": 0.3086083496971733,
+    "zebrafish": 0.9094600034402043
+   },
+   "per_size": {
+    "small": 0.24015278027917583,
+    "medium": 0.5105190869161776,
+    "large": 0.76391108900954
+   },
+   "bootstrap_ci": {
+    "ap": [
+     0.5822531785988683,
+     0.5930711074764508
+    ],
+    "ap50": [
+     0.8252623837696417,
+     0.8362820609341224
+    ],
+    "n_boot": 1000
+   }
+  },
+  {
+   "name": "rfdetr_medium_1024",
+   "label": "RF-DETR-Medium-1024",
+   "kind": "baseline",
+   "trunk": null,
+   "backbone_trainable": null,
+   "predictions": "results_cfd17/rfdetr_medium_1024/predictions.json",
+   "n_detections": 3663200,
+   "params_trainable": null,
+   "params_total": null,
+   "gflops": 331.1,
+   "gflops_input": "1024x1024",
+   "images_per_s": 50.6429745802488,
+   "ms_per_image": 19.746075507776528,
+   "peak_gpu_mem_mb": null,
+   "ap": 0.6019870642641278,
+   "ap50": 0.840405672988282,
+   "ap75": 0.661252779021345,
+   "ar100": 0.7011203351397055,
+   "ap_recomputed": 0.6019870642641278,
+   "ap50_recomputed": 0.840405672988282,
+   "tau": 0.4,
+   "tau_f1": 0.4,
+   "f1_at_tau": 0.8161144913181461,
+   "mae_at_tau": 0.3811967678532431,
+   "per_source": {
+    "brackish_dataset": 0.5113432529695727,
+    "coralscapes": 0.3658898546353411,
+    "deep_vision": 0.7715438275214995,
+    "deepfish": 0.7098646367158798,
+    "f4k": 0.5459914705792895,
+    "fathomnet": 0.5491349667566744,
+    "fishclef": 0.5835717164745072,
+    "kakadu": 0.6543057760864668,
+    "marine_detect": 0.6443933785840781,
+    "mit_river_herring": 0.7305676034748462,
+    "noaa_puget": 0.16027196235926663,
+    "project_natick": 0.20631181154461453,
+    "roboflow_fish": 0.6620960281494501,
+    "salmon_computer_vision": 0.8695867458494129,
+    "torsi": 0.5944849633529327,
+    "viame_fishtrack": 0.3139231997057719,
+    "zebrafish": 0.9530677042945919
+   },
+   "per_size": {
+    "small": 0.2647564077528513,
+    "medium": 0.5218380204099621,
+    "large": 0.7739446386679774
+   },
+   "bootstrap_ci": {
+    "ap": [
+     0.596809989055528,
+     0.6070622458922919
+    ],
+    "ap50": [
+     0.835208100245325,
+     0.8454681839255721
+    ],
+    "n_boot": 1000
+   }
+  }
+ ],
+ "paired": {
+  "per_source_ap": [
+   {
+    "unit": "source",
+    "n_pairs": 17,
+    "n_dropped": 0,
+    "n_nonzero": 17,
+    "n_won": 10,
+    "n_lost": 7,
+    "n_tied": 0,
+    "mean_diff": 0.012872670560719583,
+    "median_diff": 0.019460585021585763,
+    "median_diff_nonzero": 0.019460585021585763,
+    "test": "wilcoxon-signed-rank",
+    "statistic": 39.0,
+    "p_value": 0.079681396484375,
+    "pair": "Tiny vs Small"
+   },
+   {
+    "unit": "source",
+    "n_pairs": 17,
+    "n_dropped": 0,
+    "n_nonzero": 17,
+    "n_won": 3,
+    "n_lost": 14,
+    "n_tied": 0,
+    "mean_diff": -0.019811219149963078,
+    "median_diff": -0.018865932237117244,
+    "median_diff_nonzero": -0.018865932237117244,
+    "test": "wilcoxon-signed-rank",
+    "statistic": 18.0,
+    "p_value": 0.00384521484375,
+    "pair": "Tiny vs Base"
+   },
+   {
+    "unit": "source",
+    "n_pairs": 17,
+    "n_dropped": 0,
+    "n_nonzero": 17,
+    "n_won": 2,
+    "n_lost": 15,
+    "n_tied": 0,
+    "mean_diff": -0.03268388971068266,
+    "median_diff": -0.03942554119479008,
+    "median_diff_nonzero": -0.03942554119479008,
+    "test": "wilcoxon-signed-rank",
+    "statistic": 5.0,
+    "p_value": 0.000152587890625,
+    "pair": "Small vs Base"
+   }
+  ],
+  "per_image_f1": [
+   {
+    "unit": "image",
+    "n_pairs": 36632,
+    "n_dropped": 0,
+    "n_nonzero": 11495,
+    "n_won": 5834,
+    "n_lost": 5661,
+    "n_tied": 25137,
+    "mean_diff": 0.008089559180980602,
+    "median_diff": 0.0,
+    "median_diff_nonzero": 0.0357142857142857,
+    "test": "wilcoxon-signed-rank",
+    "statistic": 31555242.5,
+    "p_value": 2.9917327371262794e-05,
+    "pair": "Tiny vs Small",
+    "mean_diff_ci": [
+     0.004926178069529745,
+     0.01128544981890218
+    ],
+    "tau_a": 0.35,
+    "tau_b": 0.35
+   },
+   {
+    "unit": "image",
+    "n_pairs": 36632,
+    "n_dropped": 0,
+    "n_nonzero": 11559,
+    "n_won": 4924,
+    "n_lost": 6635,
+    "n_tied": 25073,
+    "mean_diff": -0.027170363311249078,
+    "median_diff": 0.0,
+    "median_diff_nonzero": -0.13333333333333341,
+    "test": "wilcoxon-signed-rank",
+    "statistic": 27228407.5,
+    "p_value": 9.06783234487231e-67,
+    "pair": "Tiny vs Base",
+    "mean_diff_ci": [
+     -0.030325305056896276,
+     -0.02399101278594978
+    ],
+    "tau_a": 0.35,
+    "tau_b": 0.35
+   },
+   {
+    "unit": "image",
+    "n_pairs": 36632,
+    "n_dropped": 0,
+    "n_nonzero": 11319,
+    "n_won": 4729,
+    "n_lost": 6590,
+    "n_tied": 25313,
+    "mean_diff": -0.03525992249222969,
+    "median_diff": 0.0,
+    "median_diff_nonzero": -0.1428571428571429,
+    "test": "wilcoxon-signed-rank",
+    "statistic": 24551021.0,
+    "p_value": 2.97551604661156e-103,
+    "pair": "Small vs Base",
+    "mean_diff_ci": [
+     -0.03829903997035162,
+     -0.0322574816185059
+    ],
+    "tau_a": 0.35,
+    "tau_b": 0.35
+   }
+  ]
+ },
+ "tables": {
+  "headline": {
+   "columns": [
+    "System",
+    "Trunk",
+    "Trainable M",
+    "Total M",
+    "GFLOPs",
+    "FLOPs input",
+    "img/s",
+    "ms/img",
+    "Peak GPU MB",
+    "AP",
+    "AP50",
+    "AP75",
+    "AR100",
+    "tau",
+    "F1 @tau",
+    "count MAE @tau"
+   ],
+   "rows": [
+    [
+     "Tiny",
+     "tiny",
+     "3.49",
+     "31.31",
+     "220.0",
+     "1024x576",
+     "123.36",
+     "8.1",
+     "394",
+     "0.3766",
+     "0.6656",
+     "0.3843",
+     "0.5299",
+     "0.35",
+     "0.6736",
+     "0.694"
+    ],
+    [
+     "Small",
+     "small",
+     "3.49",
+     "52.94",
+     "319.4",
+     "1024x576",
+     "78.93",
+     "12.7",
+     "483",
+     "0.3724",
+     "0.6797",
+     "0.3650",
+     "0.5204",
+     "0.35",
+     "0.6795",
+     "0.674"
+    ],
+    [
+     "Base",
+     "base",
+     "3.58",
+     "91.15",
+     "477.0",
+     "1024x576",
+     "75.68",
+     "13.2",
+     "640",
+     "0.3966",
+     "0.6967",
+     "0.4083",
+     "0.5433",
+     "0.35",
+     "0.6978",
+     "0.648"
+    ],
+    [
+     "RF-DETR-Nano-640",
+     "\u2014",
+     "\u2014",
+     "\u2014",
+     "97.3",
+     "640x640",
+     "58.34",
+     "17.1",
+     "\u2014",
+     "0.5876",
+     "0.8309",
+     "0.6479",
+     "0.6916",
+     "0.40",
+     "0.8087",
+     "0.386"
+    ],
+    [
+     "RF-DETR-Medium-1024",
+     "\u2014",
+     "\u2014",
+     "\u2014",
+     "331.1",
+     "1024x1024",
+     "50.64",
+     "19.7",
+     "\u2014",
+     "0.6020",
+     "0.8404",
+     "0.6613",
+     "0.7011",
+     "0.40",
+     "0.8161",
+     "0.381"
+    ]
+   ]
+  },
+  "per_source_ap": {
+   "columns": [
+    "Source",
+    "val images",
+    "Tiny",
+    "Small",
+    "Base",
+    "RF-DETR-Nano-640",
+    "RF-DETR-Medium-1024"
+   ],
+   "rows": [
+    [
+     "brackish_dataset",
+     "3127",
+     "0.3070",
+     "0.2827",
+     "0.3234",
+     "0.4923",
+     "0.5113"
+    ],
+    [
+     "coralscapes",
+     "392",
+     "0.2470",
+     "0.2133",
+     "0.2692",
+     "0.2816",
+     "0.3659"
+    ],
+    [
+     "deep_vision",
+     "305",
+     "0.3187",
+     "0.2954",
+     "0.3243",
+     "0.7789",
+     "0.7715"
+    ],
+    [
+     "deepfish",
+     "53",
+     "0.5051",
+     "0.5188",
+     "0.5042",
+     "0.7270",
+     "0.7099"
+    ],
+    [
+     "f4k",
+     "191",
+     "0.3562",
+     "0.3178",
+     "0.3669",
+     "0.5861",
+     "0.5460"
+    ],
+    [
+     "fathomnet",
+     "3999",
+     "0.3004",
+     "0.3097",
+     "0.3336",
+     "0.5404",
+     "0.5491"
+    ],
+    [
+     "fishclef",
+     "2604",
+     "0.3863",
+     "0.4001",
+     "0.4395",
+     "0.5747",
+     "0.5836"
+    ],
+    [
+     "kakadu",
+     "4000",
+     "0.5288",
+     "0.5094",
+     "0.5407",
+     "0.6383",
+     "0.6543"
+    ],
+    [
+     "marine_detect",
+     "4000",
+     "0.3263",
+     "0.3267",
+     "0.3452",
+     "0.6341",
+     "0.6444"
+    ],
+    [
+     "mit_river_herring",
+     "4000",
+     "0.2703",
+     "0.2038",
+     "0.2472",
+     "0.7273",
+     "0.7306"
+    ],
+    [
+     "noaa_puget",
+     "4000",
+     "0.0865",
+     "0.0762",
+     "0.1223",
+     "0.1156",
+     "0.1603"
+    ],
+    [
+     "project_natick",
+     "215",
+     "0.1259",
+     "0.1035",
+     "0.1392",
+     "0.2387",
+     "0.2063"
+    ],
+    [
+     "roboflow_fish",
+     "406",
+     "0.3880",
+     "0.3633",
+     "0.4073",
+     "0.6705",
+     "0.6621"
+    ],
+    [
+     "salmon_computer_vision",
+     "4000",
+     "0.4116",
+     "0.4246",
+     "0.4982",
+     "0.8796",
+     "0.8696"
+    ],
+    [
+     "torsi",
+     "202",
+     "0.3306",
+     "0.3683",
+     "0.3554",
+     "0.5951",
+     "0.5945"
+    ],
+    [
+     "viame_fishtrack",
+     "4000",
+     "0.2385",
+     "0.2554",
+     "0.2602",
+     "0.3086",
+     "0.3139"
+    ],
+    [
+     "zebrafish",
+     "1138",
+     "0.7688",
+     "0.7082",
+     "0.7561",
+     "0.9095",
+     "0.9531"
+    ]
+   ]
+  },
+  "per_size_ap": {
+   "columns": [
+    "System",
+    "AP small",
+    "AP medium",
+    "AP large"
+   ],
+   "rows": [
+    [
+     "Tiny",
+     "0.1765",
+     "0.3809",
+     "0.4513"
+    ],
+    [
+     "Small",
+     "0.1536",
+     "0.3742",
+     "0.4492"
+    ],
+    [
+     "Base",
+     "0.1811",
+     "0.3962",
+     "0.4782"
+    ],
+    [
+     "RF-DETR-Nano-640",
+     "0.2402",
+     "0.5105",
+     "0.7639"
+    ],
+    [
+     "RF-DETR-Medium-1024",
+     "0.2648",
+     "0.5218",
+     "0.7739"
+    ]
+   ]
+  },
+  "bootstrap": {
+   "columns": [
+    "System",
+    "AP",
+    "AP 2.5 %",
+    "AP 97.5 %",
+    "AP50",
+    "AP50 2.5 %",
+    "AP50 97.5 %",
+    "resamples",
+    "seconds"
+   ],
+   "rows": [
+    [
+     "Tiny",
+     "0.3766",
+     "0.3718",
+     "0.3815",
+     "0.6656",
+     "0.6593",
+     "0.6712",
+     "1000",
+     "580.5"
+    ],
+    [
+     "Small",
+     "0.3724",
+     "0.3677",
+     "0.3765",
+     "0.6797",
+     "0.6732",
+     "0.6850",
+     "1000",
+     "537.7"
+    ],
+    [
+     "Base",
+     "0.3966",
+     "0.3919",
+     "0.4009",
+     "0.6967",
+     "0.6908",
+     "0.7023",
+     "1000",
+     "551.7"
+    ],
+    [
+     "RF-DETR-Nano-640",
+     "0.5876",
+     "0.5823",
+     "0.5931",
+     "0.8309",
+     "0.8253",
+     "0.8363",
+     "1000",
+     "899.8"
+    ],
+    [
+     "RF-DETR-Medium-1024",
+     "0.6020",
+     "0.5968",
+     "0.6071",
+     "0.8404",
+     "0.8352",
+     "0.8455",
+     "1000",
+     "3020.1"
+    ]
+   ]
+  },
+  "paired_per_source_ap": {
+   "columns": [
+    "A vs B",
+    "median dAP",
+    "sources A wins",
+    "sources B wins",
+    "ties",
+    "test",
+    "statistic",
+    "p"
+   ],
+   "rows": [
+    [
+     "Tiny vs Small",
+     "+0.0195",
+     "10",
+     "7",
+     "0",
+     "wilcoxon-signed-rank",
+     "39.0",
+     "0.0797"
+    ],
+    [
+     "Tiny vs Base",
+     "-0.0189",
+     "3",
+     "14",
+     "0",
+     "wilcoxon-signed-rank",
+     "18.0",
+     "0.0038"
+    ],
+    [
+     "Small vs Base",
+     "-0.0394",
+     "2",
+     "15",
+     "0",
+     "wilcoxon-signed-rank",
+     "5.0",
+     "0.0002"
+    ]
+   ]
+  },
+  "paired_per_image_f1": {
+   "columns": [
+    "A vs B",
+    "tau A",
+    "tau B",
+    "mean dF1",
+    "dF1 2.5 %",
+    "dF1 97.5 %",
+    "images",
+    "non-zero pairs",
+    "test",
+    "p"
+   ],
+   "rows": [
+    [
+     "Tiny vs Small",
+     "0.35",
+     "0.35",
+     "+0.0081",
+     "+0.0049",
+     "+0.0113",
+     "36632",
+     "11495",
+     "wilcoxon-signed-rank",
+     "2.992e-05"
+    ],
+    [
+     "Tiny vs Base",
+     "0.35",
+     "0.35",
+     "-0.0272",
+     "-0.0303",
+     "-0.0240",
+     "36632",
+     "11559",
+     "wilcoxon-signed-rank",
+     "9.068e-67"
+    ],
+    [
+     "Small vs Base",
+     "0.35",
+     "0.35",
+     "-0.0353",
+     "-0.0383",
+     "-0.0323",
+     "36632",
+     "11319",
+     "wilcoxon-signed-rank",
+     "2.976e-103"
+    ]
+   ]
+  },
+  "best_vs_last": {
+   "columns": [
+    "Run",
+    "Checkpoint",
+    "AP",
+    "AP50",
+    "AP75",
+    "F1 @tau",
+    "tau"
+   ],
+   "rows": [
+    [
+     "Tiny",
+     "best (selected)",
+     "0.3766",
+     "0.6656",
+     "0.3843",
+     "0.6736",
+     "0.35"
+    ],
+    [
+     "Tiny",
+     "last (final epoch)",
+     "0.3766",
+     "0.6656",
+     "0.3843",
+     "0.6736",
+     "0.35"
+    ],
+    [
+     "Small",
+     "best (selected)",
+     "0.3724",
+     "0.6797",
+     "0.3650",
+     "0.6795",
+     "0.35"
+    ],
+    [
+     "Small",
+     "last (final epoch)",
+     "0.3829",
+     "0.6685",
+     "0.3928",
+     "0.6723",
+     "0.35"
+    ],
+    [
+     "Base",
+     "best (selected)",
+     "0.3966",
+     "0.6967",
+     "0.4083",
+     "0.6978",
+     "0.35"
+    ],
+    [
+     "Base",
+     "last (final epoch)",
+     "0.3967",
+     "0.6959",
+     "0.4036",
+     "0.6968",
+     "0.35"
+    ]
+   ]
+  }
+ },
+ "figures": {
+  "pareto_ap_gflops.png": "figures/pareto_ap_gflops.png",
+  "pareto_ap50_gflops.png": "figures/pareto_ap50_gflops.png",
+  "per_source_ap.png": "figures/per_source_ap.png",
+  "per_size_ap.png": "figures/per_size_ap.png",
+  "bootstrap_ci.png": "figures/bootstrap_ci.png",
+  "training_curves.png": "figures/training_curves.png",
+  "pr_curves.png": "figures/pr_curves.png",
+  "tau_calibration.png": "figures/tau_calibration.png"
+ },
+ "provenance": [
+  "val ground truth: data/cfd17/val/annotations.json \u2014 36632 images, 52038 boxes, 17 sources, 1 category",
+  "tau calibration and per-scope metrics: results_sweep/results_summary.json",
+  "baseline cost metrics: results_cfd17/baseline_metrics.json",
+  "bootstrap: 1000 image-level resamples, seed 0, 3 worker process(es)",
+  "trunk measurements for 'tiny': results_cfd17/trunk_tiny.json",
+  "trunk measurements for 'small': results_cfd17/trunk_small.json",
+  "trunk measurements for 'base': results_cfd17/trunk_base.json"
+ ],
+ "missing": [],
+ "parity_warnings": []
+}
