@@ -29,6 +29,15 @@ PROJECT_TAG="${PROJECT_TAG:-cfd-benchmark}"
 NAME_TAG="${NAME_TAG:-cfd-benchmark}"
 ALLOW_DIRTY="${ALLOW_DIRTY:-0}"
 SUBNET_ID="${SUBNET_ID:-}"
+# Forwarded to run_all.sh on the box. Empty = run_all.sh's own defaults.
+#   RUNS="name=config [name=config ...]"  which training runs, in order
+#   RUN_BASELINES=0                       skip the published RF-DETR baselines
+#   MEASURE_SIZES="tiny small"            trunk measurements after training
+#   EPOCHS=8                              overrides every run's epoch count
+RUNS="${RUNS:-}"
+RUN_BASELINES="${RUN_BASELINES:-}"
+MEASURE_SIZES="${MEASURE_SIZES:-}"
+EPOCHS="${EPOCHS:-}"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="${REPO:-$(cd "$HERE/../../../.." && pwd)}"
@@ -106,13 +115,27 @@ fi
 # user-data is a temp copy of bootstrap.sh with the placeholders filled in.
 USER_DATA="$(mktemp -t cfd-bootstrap.XXXXXX)"
 trap 'rm -f "$USER_DATA"' EXIT
-sed -e "s|__BRANCH__|${BRANCH}|g" \
-    -e "s|__S3_URI__|${S3_URI}|g" \
-    -e "s|__RESUME__|${RESUME}|g" \
-    -e "s|__CODE_KEY__|${CODE_KEY}|g" \
-    -e "s|__REGION__|${REGION}|g" \
-    -e "s|__S3_REGION__|${S3_REGION}|g" \
+# A value going into a sed REPLACEMENT must have \, & and the | delimiter
+# escaped — RUNS carries filesystem paths, so this is not hypothetical.
+sed_escape() { printf '%s' "$1" | sed -e 's/[\\&|]/\\\\&/g'; }
+sed -e "s|__BRANCH__|$(sed_escape "$BRANCH")|g" \
+    -e "s|__S3_URI__|$(sed_escape "$S3_URI")|g" \
+    -e "s|__RESUME__|$(sed_escape "$RESUME")|g" \
+    -e "s|__CODE_KEY__|$(sed_escape "$CODE_KEY")|g" \
+    -e "s|__REGION__|$(sed_escape "$REGION")|g" \
+    -e "s|__S3_REGION__|$(sed_escape "$S3_REGION")|g" \
+    -e "s|__RUNS__|$(sed_escape "$RUNS")|g" \
+    -e "s|__RUN_BASELINES__|$(sed_escape "$RUN_BASELINES")|g" \
+    -e "s|__MEASURE_SIZES__|$(sed_escape "$MEASURE_SIZES")|g" \
+    -e "s|__EPOCHS__|$(sed_escape "$EPOCHS")|g" \
     "$HERE/bootstrap.sh" > "$USER_DATA"
+# A placeholder left behind means a value this launcher does not know about:
+# the box would read the literal "__NAME__" and do the wrong thing silently.
+if grep -q '__[A-Z0-9_]\+__' "$USER_DATA"; then
+    echo "refusing to launch: unsubstituted placeholder(s) in user-data:" >&2
+    grep -o '__[A-Z0-9_]\+__' "$USER_DATA" | sort -u >&2
+    exit 1
+fi
 
 RUN_ARGS=(
     run-instances
