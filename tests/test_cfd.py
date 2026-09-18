@@ -696,3 +696,203 @@ def test_fetch_rewrites_file_name_to_the_on_disk_basename(fetched):
             assert "/" not in image["file_name"]
             assert (split_dir / "images" / image["file_name"]).exists()
             assert image["cfd_file_name"] == native_names[image["id"]]
+
+
+# --------------------------------------------------------------------------- #
+# points
+# --------------------------------------------------------------------------- #
+#
+# The fetched brackish+torsi subset, hand-counted:
+#   train  14 images  22 boxes  0 empty   (clipA 8 + clipB 8 + torsiclip1 6)
+#   val    10 images  12 boxes  1 empty   (clipC 6 + torsiclip2 6; clipC frame 3)
+
+POINTS_EXPECTED = {
+    "train": {"n_images": 14, "n_boxes": 22, "n_empty": 0},
+    "val": {"n_images": 10, "n_boxes": 12, "n_empty": 1},
+}
+
+
+def _centre(bbox):
+    x, y, w, h = (float(v) for v in bbox[:4])
+    return x + w / 2.0, y + h / 2.0
+
+
+def test_points_keypoints_are_exact_box_centres(fetched):
+    out, _result, _calls = fetched
+    for split, expected in POINTS_EXPECTED.items():
+        document = read_split(out, split)
+        points, _id_map = cfd.bbox_centres_to_keypoints(document)
+
+        assert points["categories"] == [
+            {"id": 1, "name": "fish", "keypoints": ["fish"], "skeleton": []}
+        ]
+        assert len(points["annotations"]) == expected["n_boxes"]
+        by_box = {tuple(a["bbox"]): a for a in points["annotations"]}
+        for ann in document["annotations"]:
+            keyed = by_box[tuple(ann["bbox"])]
+            cx, cy = _centre(ann["bbox"])
+            assert keyed["keypoints"] == [cx, cy, 2]
+            assert keyed["num_keypoints"] == 1
+            assert keyed["category_id"] == 1
+            # bbox/area ride along untouched
+            assert keyed["bbox"] == ann["bbox"] and keyed["area"] == ann["area"]
+
+
+def test_points_renumbers_ids_to_ints_and_the_map_round_trips(fetched):
+    out, _result, _calls = fetched
+    document = read_split(out, "train")
+    points, id_map = cfd.bbox_centres_to_keypoints(document)
+
+    image_ids = [img["id"] for img in points["images"]]
+    assert image_ids == list(range(1, len(document["images"]) + 1))
+    assert all(isinstance(i, int) and not isinstance(i, bool) for i in image_ids)
+
+    ann_ids = [a["id"] for a in points["annotations"]]
+    assert ann_ids == list(range(1, len(points["annotations"]) + 1))
+    assert all(isinstance(i, int) for i in ann_ids)
+
+    # the string id survives on the record, and the map is its inverse
+    for original, new in id_map.items():
+        assert isinstance(original, str) and isinstance(new, int)
+    assert {img["cfd_image_id"]: img["id"] for img in points["images"]} == id_map
+    assert id_map == {img["id"]: n + 1 for n, img in enumerate(document["images"])}
+
+    # every extra CFD per-image field is carried through verbatim
+    source = {img["id"]: img for img in document["images"]}
+    for image in points["images"]:
+        original = source[image["cfd_image_id"]]
+        for key in ("file_name", "width", "height", "dataset", "is_train",
+                    "cfd_sequence", "cfd_scale", "cfd_file_name",
+                    "original_data_source"):
+            assert image[key] == original[key], key
+
+    # annotation image_ids point at the new ints, never the old strings
+    assert {a["image_id"] for a in points["annotations"]} <= set(image_ids)
+
+
+def test_points_document_reads_back_through_parse_coco_keypoints(fetched, tmp_path):
+    from cropcounter.crop_dataset import parse_coco_keypoints
+
+    out, _result, _calls = fetched
+    for split, expected in POINTS_EXPECTED.items():
+        document = read_split(out, split)
+        points, _id_map = cfd.bbox_centres_to_keypoints(document)
+        path = tmp_path / f"{split}_points.json"
+        path.write_text(json.dumps(points), encoding="utf-8")
+
+        records = parse_coco_keypoints(path, labels=["fish"])
+        # empty images ARE kept as records with zero points (parse_coco_keypoints
+        # creates one record per entry in "images" and only then attaches points)
+        assert len(records) == expected["n_images"]
+        assert sum(len(r.points) for r in records) == expected["n_boxes"]
+        assert sum(1 for r in records if not r.points) == expected["n_empty"]
+        for record, image in zip(records, points["images"]):
+            assert record.name == image["file_name"]
+            assert (record.width, record.height) == (image["width"], image["height"])
+        assert all(p.label == "fish" for r in records for p in r.points)
+
+        # the default labels=("Wheat", "Volunteer") silently drop every fish
+        assert sum(len(r.points) for r in parse_coco_keypoints(path)) == 0
+
+
+def test_raw_bbox_subset_is_unreadable_as_points(fetched, tmp_path):
+    """Negative control for the two reasons conversion must happen here.
+
+    CFD image ids are strings, so ``parse_coco_keypoints``' ``int(image["id"])``
+    raises; and even with int ids a bbox-only document loads silently EMPTY
+    because it carries no ``keypoints``.
+    """
+    from cropcounter.crop_dataset import parse_coco_keypoints
+
+    out, _result, _calls = fetched
+    with pytest.raises(ValueError):
+        parse_coco_keypoints(Path(out) / "train" / "annotations.json", labels=["fish"])
+
+    document = read_split(out, "train")
+    renumbered = {img["id"]: n + 1 for n, img in enumerate(document["images"])}
+    document["images"] = [dict(i, id=renumbered[i["id"]]) for i in document["images"]]
+    document["annotations"] = [
+        dict(a, image_id=renumbered[a["image_id"]]) for a in document["annotations"]
+    ]
+    int_ids = tmp_path / "int_ids_boxes.json"
+    int_ids.write_text(json.dumps(document), encoding="utf-8")
+    records = parse_coco_keypoints(int_ids, labels=["fish"])
+    assert len(records) == POINTS_EXPECTED["train"]["n_images"]
+    assert sum(len(r.points) for r in records) == 0  # silently empty
+
+
+def test_points_drop_empty_removes_exactly_the_empty_frames(fetched):
+    out, _result, _calls = fetched
+    document = read_split(out, "val")
+    kept, kept_map = cfd.bbox_centres_to_keypoints(document)
+    dropped, dropped_map = cfd.bbox_centres_to_keypoints(document, drop_empty=True)
+
+    n_empty = POINTS_EXPECTED["val"]["n_empty"]
+    assert len(kept["images"]) == POINTS_EXPECTED["val"]["n_images"]
+    assert len(dropped["images"]) == len(kept["images"]) - n_empty
+    assert len(dropped["annotations"]) == len(kept["annotations"])
+
+    boxed = {a["image_id"] for a in document["annotations"]}
+    gone = {img["id"] for img in document["images"]} - boxed
+    assert len(gone) == n_empty
+    assert set(dropped_map) == set(kept_map) - gone
+    # ids stay consecutive after the drop
+    assert [i["id"] for i in dropped["images"]] == list(range(1, len(dropped["images"]) + 1))
+
+
+def test_points_refuses_an_unfetched_subset(master_json, tmp_path):
+    out = tmp_path / "unfetched"
+    cfd.run_subset(master_json, out, sources=["torsi"], progress=False)
+    document = read_split(out, "train")
+    assert all("cfd_scale" not in img for img in document["images"])
+    with pytest.raises(ValueError, match="cfd_scale"):
+        cfd.bbox_centres_to_keypoints(document)
+    with pytest.raises(ValueError, match="cfd_scale"):
+        cfd.write_points_root(out, tmp_path / "unfetched_points")
+
+
+def test_cli_points_writes_both_splits_the_id_map_and_the_summary(fetched, tmp_path):
+    out, _result, _calls = fetched
+    points_root = tmp_path / "points_root"
+    assert cfd.main([
+        "points", "--subset", str(out), "--out", str(points_root),
+    ]) == 0
+
+    id_map = json.loads((points_root / "cfd_id_map.json").read_text())
+    summary = json.loads((points_root / "points_summary.json").read_text())
+    for split, expected in POINTS_EXPECTED.items():
+        document = json.loads(
+            (points_root / split / "annotations.json").read_text(encoding="utf-8")
+        )
+        assert len(document["images"]) == expected["n_images"]
+        assert len(document["annotations"]) == expected["n_boxes"]
+        assert len(id_map[split]) == expected["n_images"]
+        assert summary[split] == {
+            "n_images": expected["n_images"],
+            "n_points": expected["n_boxes"],
+            "n_empty": expected["n_empty"],
+            "dropped_empty": 0,
+            "category": "fish",
+            "subset": str(Path(out).resolve() / split),
+        }
+        # images/ is a symlink into the bbox subset, not a second copy
+        images = points_root / split / cfd.IMAGES_DIRNAME
+        assert images.is_symlink()
+        assert images.resolve() == (Path(out) / split / cfd.IMAGES_DIRNAME).resolve()
+        for image in document["images"]:
+            assert (images / image["file_name"]).is_file()
+
+    # the separate root matters: resolve_annotations picks annotations.json first,
+    # so a points file sitting beside the bbox one could never win.
+    from cropcounter.crop_dataset import resolve_annotations
+    assert resolve_annotations(points_root / "train", "coco") == \
+        points_root / "train" / "annotations.json"
+
+
+def test_points_copy_images_writes_real_files(fetched, tmp_path):
+    out, _result, _calls = fetched
+    copied = tmp_path / "points_copied"
+    cfd.write_points_root(out, copied, copy_images=True)
+    images = copied / "train" / cfd.IMAGES_DIRNAME
+    assert not images.is_symlink() and images.is_dir()
+    assert len(list(images.iterdir())) == POINTS_EXPECTED["train"]["n_images"]

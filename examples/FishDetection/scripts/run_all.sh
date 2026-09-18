@@ -35,6 +35,18 @@ RFDETR_NANO_URL="${RFDETR_NANO_URL:-https://github.com/filippovarini/community-f
 RFDETR_MEDIUM_URL="${RFDETR_MEDIUM_URL:-https://github.com/filippovarini/community-fish-detector/releases/download/2026.07.06-release/cfd-rf-detr-medium-1024-2026.03.24.cp-011.20260706-release.pth}"
 ALLOW_LARGE_FETCH="${ALLOW_LARGE_FETCH:-0}"
 MAX_FETCH_IMAGES="${MAX_FETCH_IMAGES:-250000}"
+# A point-task run trains on a SEPARATE data root: `cfd points` converts the
+# fetched bbox subset's centres to COCO keypoints and symlinks the pixels, so
+# this costs a few minutes and no extra disk. Built automatically when any run
+# in RUNS is a point run — never a flag to remember, because pointing a point
+# run at the bbox root loads SILENTLY EMPTY (no `keypoints` key -> zero targets,
+# no error) and would burn a whole GPU box training on nothing.
+POINTS_ROOT="${POINTS_ROOT:-${DATA_ROOT}_points}"
+POINTS_CATEGORY="${POINTS_CATEGORY:-fish}"
+# The released RF-DETR baselines and the box scorer. Both are published numbers
+# on this val split, so a run that adds neither a box run nor a new split has
+# nothing to learn by paying for them again: set RUN_BASELINES=0.
+RUN_BASELINES="${RUN_BASELINES:-1}"
 CONFIG_FROZEN="${CONFIG_FROZEN:-$REPO/examples/FishDetection/config_cfd17_frozen_8ep.json}"
 CONFIG_UNFROZEN="${CONFIG_UNFROZEN:-$REPO/examples/FishDetection/config_cfd17_unfrozen_8ep.json}"
 MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-}"
@@ -109,6 +121,19 @@ fi
 echo "======================================================================"
 
 start_sync_loop
+
+# --- 1b. which task a config trains ----------------------------------------- #
+config_task() {
+    "$PY" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("task","point"))' "$1"
+}
+
+any_run_is() {
+    local want="$1" pair
+    for pair in $RUNS; do
+        [ "$(config_task "${pair#*=}")" = "$want" ] && return 0
+    done
+    return 1
+}
 
 # --- 2. CFD metadata -------------------------------------------------------- #
 if [ -s "$CFD_META" ]; then
@@ -199,7 +224,30 @@ if [ -n "$S3_URI" ]; then
         --exclude '*/images/*' --exclude '.fetched' --only-show-errors || true
 fi
 
-# --- 6. the two training runs ----------------------------------------------- #
+# --- 5b. the point-task data root ------------------------------------------- #
+if any_run_is point; then
+    if [ -f "$POINTS_ROOT/points_summary.json" ]; then
+        echo "[skip] points root already at $POINTS_ROOT"
+    else
+        echo "[run ] cfd points -> $POINTS_ROOT (pixels symlinked, not copied)"
+        "$PY" -m cropcounter.cfd points \
+            --subset "$DATA_ROOT" --out "$POINTS_ROOT" --category "$POINTS_CATEGORY"
+    fi
+    # The conversion is worthless if it silently produced no points.
+    "$PY" - "$POINTS_ROOT" <<'PYGATE'
+import json, sys
+from pathlib import Path
+summary = json.loads((Path(sys.argv[1]) / "points_summary.json").read_text())
+for split, row in summary.items():
+    print(f"[gate] points/{split}: {row['n_images']:,} images, {row['n_points']:,} points")
+    if row["n_points"] == 0:
+        sys.exit(f"ABORT: {split} converted to ZERO points — the bbox subset had no boxes?")
+PYGATE
+else
+    echo "[skip] points root (no point run in RUNS)"
+fi
+
+# --- 6. the training runs ---------------------------------------------------- #
 run_train() {
     local name="$1" config="$2"
     local run_dir="$RUNS_DIR/$name"
@@ -207,9 +255,15 @@ run_train() {
         echo "[skip] train $name (.done present)"
         return 0
     fi
+    # The data root follows the config's task, not the caller's memory.
+    local task root
+    task="$(config_task "$config")"
+    root="$DATA_ROOT"
+    [ "$task" = "point" ] && root="$POINTS_ROOT"
+    echo "[info] $name: task=$task data_root=$root"
     local args=(-m cropcounter.train
         --config "$config"
-        --data-root "$DATA_ROOT"
+        --data-root "$root"
         --weights-dir "$WEIGHTS_DIR"
         --out-dir "$RUNS_DIR"
         --run-name "$name"
@@ -265,22 +319,43 @@ run_baseline() {
         --side "$side"
 }
 
-run_baseline rfdetr_nano_640 "$RFDETR_NANO_URL" 640
-run_baseline rfdetr_medium_1024 "$RFDETR_MEDIUM_URL" 1024
+if [ "$RUN_BASELINES" = "1" ]; then
+    run_baseline rfdetr_nano_640 "$RFDETR_NANO_URL" 640
+    run_baseline rfdetr_medium_1024 "$RFDETR_MEDIUM_URL" 1024
 
-# GFLOPs for both baselines into the same metrics file (needs autograd on; the
-# script handles that). Report-only: a failure here must not stop the run.
-echo "[run ] rfdetr_flops"
-"$PY" "$HERE/rfdetr_flops.py" --weights "$WEIGHTS_DIR/baselines" \
-    --metrics "$RESULTS_DIR/baseline_metrics.json" || echo "[warn] rfdetr_flops failed"
+    # GFLOPs for both baselines into the same metrics file (needs autograd on; the
+    # script handles that). Report-only: a failure here must not stop the run.
+    echo "[run ] rfdetr_flops"
+    "$PY" "$HERE/rfdetr_flops.py" --weights "$WEIGHTS_DIR/baselines" \
+        --metrics "$RESULTS_DIR/baseline_metrics.json" || echo "[warn] rfdetr_flops failed"
+else
+    echo "[skip] RF-DETR baselines (RUN_BASELINES=0 — already published on this split)"
+fi
 
-# --- 8. one scorer over everything ------------------------------------------ #
-echo "[run ] evaluate_cfd17"
-"$PY" "$HERE/evaluate_cfd17.py" \
-    --data-root "$DATA_ROOT" \
-    --runs-dir "$RUNS_DIR" \
-    --baselines-dir "$RESULTS_DIR" \
-    --out "$RESULTS_DIR"
+# --- 8. the scorers ---------------------------------------------------------- #
+# Box runs and the baselines go through the COCO scorer; point runs through the
+# point-in-box one. Both are CPU-only and read prediction files off disk, so
+# either can be re-run on a laptop after the box is gone.
+if any_run_is box || [ "$RUN_BASELINES" = "1" ]; then
+    echo "[run ] evaluate_cfd17 (box)"
+    "$PY" "$HERE/evaluate_cfd17.py" \
+        --data-root "$DATA_ROOT" \
+        --runs-dir "$RUNS_DIR" \
+        --baselines-dir "$RESULTS_DIR" \
+        --out "$RESULTS_DIR"
+else
+    echo "[skip] evaluate_cfd17 (no box run and no baselines to score)"
+fi
+
+if any_run_is point; then
+    # GT is the BBOX root: scoring points against the centres we derived
+    # ourselves would be marking our own homework.
+    echo "[run ] evaluate_cfd17_points (point-in-box)"
+    "$PY" "$HERE/evaluate_cfd17_points.py" \
+        --data-root "$DATA_ROOT" \
+        --runs-dir "$RUNS_DIR" \
+        --out "$RESULTS_DIR"
+fi
 
 # --- 9. MLflow -------------------------------------------------------------- #
 if [ -n "$MLFLOW_TRACKING_URI" ]; then
