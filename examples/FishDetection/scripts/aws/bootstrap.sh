@@ -27,6 +27,14 @@ RUNS="${RUNS:-__RUNS__}"
 RUN_BASELINES="${RUN_BASELINES:-__RUN_BASELINES__}"
 MEASURE_SIZES="${MEASURE_SIZES:-__MEASURE_SIZES__}"
 EPOCHS="${EPOCHS:-__EPOCHS__}"
+# Dead-man's switch. NOTHING in this pipeline shuts the box down: run_all.sh
+# finishes and the instance keeps billing at ~$2.50/h until someone runs
+# teardown.sh. A launch that lands while nobody is watching would otherwise
+# burn ~$60/day indefinitely. Paired with --instance-initiated-shutdown-behavior
+# terminate, this scheduled shutdown terminates the instance.
+# Generous on purpose: the run is ~5.8 h, so 10 h still leaves a failed run
+# several hours to be inspected in before it disappears.
+MAX_WALL_HOURS="${MAX_WALL_HOURS:-__MAX_WALL_HOURS__}"
 SSM_REGION="${SSM_REGION:-eu-west-2}"     # the MLflow SecureStrings live here
 NVME="${NVME:-/opt/dlami/nvme}"
 
@@ -191,5 +199,14 @@ setsid nohup bash "$REPO_DIR/examples/FishDetection/scripts/run_all.sh" \
     < /dev/null > "$NVME/run_all.nohup" 2>&1 &
 echo "run_all.sh started (pid $!); log at $NVME/runs/run_all.log"
 UBUNTU
+
+# --- dead-man's switch ------------------------------------------------------ #
+if [ -n "${MAX_WALL_HOURS:-}" ] && [ "${MAX_WALL_HOURS}" != "0" ]; then
+    shutdown -h "+$(( MAX_WALL_HOURS * 60 ))" "cfd dead-man's switch: ${MAX_WALL_HOURS}h wall limit" \
+        && echo "dead-man's switch armed: terminating in ${MAX_WALL_HOURS}h (cancel with 'shutdown -c')" \
+        || echo "WARNING: could not arm the dead-man's switch — this box will bill until teardown.sh"
+else
+    echo "WARNING: no dead-man's switch (MAX_WALL_HOURS empty) — this box bills until teardown.sh"
+fi
 
 echo "=== cfd bootstrap handed off $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="

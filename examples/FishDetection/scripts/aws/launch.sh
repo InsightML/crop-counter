@@ -38,6 +38,9 @@ RUNS="${RUNS:-}"
 RUN_BASELINES="${RUN_BASELINES:-}"
 MEASURE_SIZES="${MEASURE_SIZES:-}"
 EPOCHS="${EPOCHS:-}"
+# Hours after boot at which the box terminates itself, whatever it is doing.
+# Nothing else ever shuts it down. 0 disables (and says so in the boot log).
+MAX_WALL_HOURS="${MAX_WALL_HOURS:-10}"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="${REPO:-$(cd "$HERE/../../../.." && pwd)}"
@@ -90,6 +93,7 @@ echo "ami          $AMI_ID (root $ROOT_DEVICE, ${ROOT_GB}GB gp3)"
 echo "profile      $PROFILE_ARN"
 echo "sg           $SG_ID ($VPC_ID)"
 echo "branch       $BRANCH @ $(git -C "$REPO" rev-parse --short HEAD) | resume=$RESUME | s3=$S3_URI"
+echo "self-destruct ${MAX_WALL_HOURS}h after boot (MAX_WALL_HOURS=0 disables)"
 
 # The code goes up as a `git archive` of HEAD (crop-counter is private; no
 # GitHub credential ever reaches the box). HEAD only -- so refuse a dirty tree,
@@ -128,6 +132,7 @@ sed -e "s|__BRANCH__|$(sed_escape "$BRANCH")|g" \
     -e "s|__RUN_BASELINES__|$(sed_escape "$RUN_BASELINES")|g" \
     -e "s|__MEASURE_SIZES__|$(sed_escape "$MEASURE_SIZES")|g" \
     -e "s|__EPOCHS__|$(sed_escape "$EPOCHS")|g" \
+    -e "s|__MAX_WALL_HOURS__|$(sed_escape "$MAX_WALL_HOURS")|g" \
     "$HERE/bootstrap.sh" > "$USER_DATA"
 # A placeholder left behind means a value this launcher does not know about:
 # the box would read the literal "__NAME__" and do the wrong thing silently.

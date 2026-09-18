@@ -23,7 +23,13 @@ BOOTSTRAP = (AWS / "bootstrap.sh").read_text()
 LAUNCH = (AWS / "launch.sh").read_text()
 
 #: Values bootstrap.sh must receive from launch.sh, and pass on to the ubuntu shell.
+#: Values that must reach run_all.sh inside the ubuntu shell.
 FORWARDED = ("RUNS", "RUN_BASELINES", "MEASURE_SIZES", "EPOCHS")
+
+#: Values bootstrap.sh consumes itself, as root, after the heredoc. These must
+#: be substituted and declared but must NOT be pushed into the ubuntu shell —
+#: run_all.sh has no use for them and wiring them there implies it does.
+ROOT_ONLY = ("MAX_WALL_HOURS",)
 
 
 def placeholders_in_bootstrap() -> set:
@@ -80,3 +86,44 @@ def test_run_all_reads_everything_bootstrap_forwards():
     run_all = (AWS.parent / "run_all.sh").read_text()
     for name in FORWARDED:
         assert f'{name}="${{{name}:-' in run_all, f"run_all.sh ignores {name}"
+
+
+# --- the dead-man's switch -------------------------------------------------- #
+#
+# Nothing else in this pipeline shuts the box down. run_all.sh finishes and the
+# instance bills at ~$2.50/h until a human runs teardown.sh, so a launch that
+# lands unattended is an open-ended cost. These pin the one thing that closes it.
+
+
+@pytest.mark.parametrize("name", ROOT_ONLY)
+def test_root_only_values_are_substituted_and_declared(name):
+    assert f"s|__{name}__|" in LAUNCH
+    assert f'{name}="${{{name}:-__{name}__}}"' in BOOTSTRAP
+
+
+@pytest.mark.parametrize("name", ROOT_ONLY)
+def test_root_only_values_do_not_leak_into_the_ubuntu_shell(name):
+    """Wiring them through implies run_all.sh honours them. It does not."""
+    env_block = BOOTSTRAP.split("sudo -u ubuntu -H env", 1)[1].split("bash -s", 1)[0]
+    assert name not in env_block
+
+
+def test_the_switch_is_armed_with_shutdown():
+    """`shutdown -h` + instance-initiated-shutdown-behavior=terminate = gone."""
+    assert 'shutdown -h "+$(( MAX_WALL_HOURS * 60 ))"' in BOOTSTRAP
+    assert "--instance-initiated-shutdown-behavior terminate" in LAUNCH
+
+
+def test_a_box_with_no_switch_says_so_loudly():
+    """Silence about an unarmed switch is how a box bills for a week."""
+    assert BOOTSTRAP.count("WARNING") >= 2
+    assert "bills until teardown.sh" in BOOTSTRAP
+
+
+def test_the_default_leaves_room_for_the_run_and_for_diagnosis():
+    """~5.8 h of run; the default must clear it without being open-ended."""
+    import re
+    match = re.search(r'MAX_WALL_HOURS="\$\{MAX_WALL_HOURS:-(\d+)\}"', LAUNCH)
+    assert match, "launch.sh must give MAX_WALL_HOURS a default"
+    hours = int(match.group(1))
+    assert 8 <= hours <= 14, f"{hours}h is too tight for a 5.8h run, or too loose"
