@@ -872,6 +872,9 @@ def test_cli_points_writes_both_splits_the_id_map_and_the_summary(fetched, tmp_p
             "n_points": expected["n_boxes"],
             "n_empty": expected["n_empty"],
             "dropped_empty": 0,
+            # This fixture's boxes sit well inside their frames; the real
+            # subset drops 48 across both splits.
+            "n_dropped_outside_frame": 0,
             "category": "fish",
             "subset": str(Path(out).resolve() / split),
         }
@@ -896,3 +899,86 @@ def test_points_copy_images_writes_real_files(fetched, tmp_path):
     images = copied / "train" / cfd.IMAGES_DIRNAME
     assert not images.is_symlink() and images.is_dir()
     assert len(list(images.iterdir())) == POINTS_EXPECTED["train"]["n_images"]
+
+
+# --------------------------------------------------------------------------- #
+# Out-of-frame box centres
+#
+# CFD carries boxes whose centre falls outside the image — 47 of 222,152 train
+# boxes (0.021%) and 1 of 52,038 val boxes, the worst 454px outside a 1024x683
+# frame. The box task never noticed: albumentations silently drops a box below
+# min_visibility. The point task DIES, because KeypointParams raises on an
+# out-of-range keypoint, and it took down a whole 8-epoch run 33 minutes in.
+#
+# They are dropped, not clipped: a centre outside the frame has no cell in the
+# heatmap to live in, and clipping it to the edge would train the model to fire
+# at image borders where nothing is.
+# --------------------------------------------------------------------------- #
+
+
+def _doc(width, height, boxes):
+    """A one-image fetched document with the given boxes."""
+    return {
+        "images": [{"id": "img_a", "file_name": "a.jpg", "width": width,
+                    "height": height, "cfd_scale": 1.0}],
+        "annotations": [
+            {"id": i + 1, "image_id": "img_a", "category_id": 1, "bbox": list(b)}
+            for i, b in enumerate(boxes)
+        ],
+        "categories": [{"id": 1, "name": "fish"}],
+    }
+
+
+def test_a_centre_outside_the_frame_is_dropped():
+    """The exact failure: x=1247.4 in a 1024-wide image."""
+    document = _doc(1024, 768, [
+        [1200.0, 650.0, 94.81, 52.01],   # centre (1247.4, 676.0) — x out of range
+        [100.0, 100.0, 50.0, 50.0],      # centre (125, 125) — fine
+    ])
+    points, _ = cfd.bbox_centres_to_keypoints(document)
+    assert len(points["annotations"]) == 1
+    assert points["annotations"][0]["keypoints"][:2] == [125.0, 125.0]
+
+
+def test_every_surviving_centre_is_inside_its_frame():
+    document = _doc(1024, 768, [
+        [1200.0, 650.0, 94.0, 52.0],     # x outside
+        [900.0, 800.0, 40.0, 61.0],      # y outside  (centre y = 830.5)
+        [-80.0, 100.0, 40.0, 40.0],      # centre x = -60, negative
+        [10.0, 10.0, 20.0, 20.0],        # good
+    ])
+    points, _ = cfd.bbox_centres_to_keypoints(document)
+    assert len(points["annotations"]) == 1
+    for ann in points["annotations"]:
+        x, y, _v = ann["keypoints"]
+        assert 0 <= x < 1024 and 0 <= y < 768
+
+
+def test_a_box_clipping_the_edge_keeps_its_centre():
+    """Only the CENTRE decides. A half-off box is still a findable object."""
+    document = _doc(1024, 768, [[-20.0, 100.0, 100.0, 50.0]])   # centre (30, 125)
+    points, _ = cfd.bbox_centres_to_keypoints(document)
+    assert len(points["annotations"]) == 1
+    assert points["annotations"][0]["keypoints"][:2] == [30.0, 125.0]
+
+
+def test_the_drop_count_is_reported_not_silent():
+    """Silently losing annotations is how a data bug becomes a model result."""
+    document = _doc(1024, 768, [[1200.0, 650.0, 94.0, 52.0], [10.0, 10.0, 20.0, 20.0]])
+    points, _ = cfd.bbox_centres_to_keypoints(document)
+    assert points["n_dropped_outside_frame"] == 1
+
+
+def test_an_image_without_a_size_keeps_its_points():
+    """No width/height means no bound to test — keep, never silently drop all."""
+    document = _doc(1024, 768, [[1200.0, 650.0, 94.0, 52.0]])
+    del document["images"][0]["width"]
+    del document["images"][0]["height"]
+    points, _ = cfd.bbox_centres_to_keypoints(document)
+    assert len(points["annotations"]) == 1
+
+
+def test_write_points_root_surfaces_the_drop_count(fetched, tmp_path):
+    summary = cfd.write_points_root(fetched[0], tmp_path / "pts")
+    for split in ("train", "val"):
+        assert "n_dropped_outside_frame" in summary[split]

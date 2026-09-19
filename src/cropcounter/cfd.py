@@ -1347,6 +1347,18 @@ def bbox_centres_to_keypoints(
       Writing real ``keypoints`` is the only thing that makes the point task
       see the data.
 
+    **A box whose CENTRE falls outside the image is dropped**, and the count
+    is reported as ``n_dropped_outside_frame``. CFD really contains these — 47
+    of 222,152 train boxes and 1 of 52,038 val boxes in the capped all-17
+    subset, the worst 454px outside a 1024x683 frame. The box task never
+    noticed, because albumentations silently drops a box below
+    ``min_bbox_visibility``; the point task dies, because ``KeypointParams``
+    raises on an out-of-range keypoint. They are dropped rather than clipped
+    for a modelling reason, not a convenience one: a centre outside the frame
+    has no cell in the stride-4 heatmap to occupy, and clipping it to the
+    border would train the head to fire at image edges where nothing is. A box
+    that merely clips the edge keeps its centre and is unaffected.
+
     Empty frames (images with no box) are **retained by default** as image
     records with no annotation, which is how standard COCO says "nothing here"
     and what gives the heatmap head its negatives. ``drop_empty=True`` removes
@@ -1374,6 +1386,15 @@ def bbox_centres_to_keypoints(
             "`python -m cropcounter.cfd fetch --subset <dir>` first."
         )
 
+    # Frame sizes, for the centre-inside-the-image test below. An image with no
+    # width/height recorded has no bound to test against, so its points are
+    # kept — a missing field must never silently empty a split.
+    sizes: Dict[Any, Tuple[float, float]] = {}
+    for image in images_in:
+        width, height = image.get("width"), image.get("height")
+        if width and height:
+            sizes[image.get("id")] = (float(width), float(height))
+
     unboxed = _unboxed_image_ids(document)
     images: List[Dict[str, Any]] = []
     id_map: Dict[Any, int] = {}
@@ -1389,6 +1410,7 @@ def bbox_centres_to_keypoints(
         id_map[original] = new_id
 
     annotations: List[Dict[str, Any]] = []
+    dropped_outside = 0
     for ann in document.get("annotations", ()):
         if not _has_bbox(ann):
             continue
@@ -1396,12 +1418,19 @@ def bbox_centres_to_keypoints(
         if image_id is None:  # its image was dropped, or is not in this document
             continue
         x, y, w, h = (float(v) for v in ann["bbox"][:4])
+        centre_x, centre_y = x + w / 2.0, y + h / 2.0
+        frame = sizes.get(ann.get("image_id"))
+        if frame is not None and not (
+            0 <= centre_x < frame[0] and 0 <= centre_y < frame[1]
+        ):
+            dropped_outside += 1
+            continue
         record = dict(ann)
         record["cfd_annotation_id"] = ann.get("id")
         record["id"] = len(annotations) + 1
         record["image_id"] = image_id
         record["category_id"] = 1
-        record["keypoints"] = [x + w / 2.0, y + h / 2.0, 2]
+        record["keypoints"] = [centre_x, centre_y, 2]
         record["num_keypoints"] = 1
         annotations.append(record)
 
@@ -1411,6 +1440,9 @@ def bbox_centres_to_keypoints(
     out["categories"] = [
         {"id": 1, "name": category_name, "keypoints": [category_name], "skeleton": []}
     ]
+    out["n_dropped_outside_frame"] = dropped_outside
+    if dropped_outside:
+        print(f"  dropped {dropped_outside} box centre(s) outside their frame")
     return out, id_map
 
 
@@ -1490,6 +1522,7 @@ def write_points_root(
         summary[split] = {
             "n_images": len(points["images"]),
             "n_points": sum(int(a["num_keypoints"]) for a in points["annotations"]),
+            "n_dropped_outside_frame": int(points["n_dropped_outside_frame"]),
             "n_empty": 0 if drop_empty else n_empty_source,
             "dropped_empty": n_empty_source if drop_empty else 0,
             "category": category,
