@@ -40,7 +40,7 @@ from .crop_dataset import (
 from .det_metrics import evaluate_boxes, write_coco_results
 from .dinov3_pyramid import CropCounter, PyramidDecoder, amp_dtype, autocast_context
 from .losses import masked_l1_loss, penalty_reduced_focal_loss
-from .metrics import evaluate
+from .metrics import evaluate, write_point_results
 
 #: TrainConfig fields that are paths on the dataclass but strings in JSON.
 _PATH_FIELDS = ("data_root", "weights_dir", "out_dir", "init_decoder_from", "resume_from")
@@ -670,6 +670,21 @@ def _write_atomically(path: Path, write: Callable[[Path], None]) -> None:
     os.replace(tmp, path)
 
 
+def _write_point_predictions(
+    cfg: TrainConfig, rows: List[Dict[str, Any]], path: Path
+) -> None:
+    """Persist a point run's detections so scoring never needs the GPU again.
+
+    The box task has written ``predictions.json`` since the first CFD-17 run;
+    without the same file a point run leaves nothing behind but its history,
+    and point-in-box F1 could only be recovered by standing the box back up.
+    """
+    write_point_results(
+        rows, path, detect_tau=cfg.ap_tau, output_stride=cfg.output_stride,
+        nms_radius=cfg.nms_radius, k=cfg.k,
+    )
+
+
 def _save_checkpoint(
     model: CropCounter,
     cfg: TrainConfig,
@@ -1006,6 +1021,7 @@ def train(cfg: TrainConfig) -> Tuple[CropCounter, Dict[str, List[float]], str, i
                   f"lr {lr_now:.2e}{backbone_note}")
         else:
             detections: List[Dict[str, Any]] = []
+            point_rows: List[Dict[str, Any]] = []
             if cfg.task == "box":
                 summary, _, detections = evaluate_boxes(
                     model, val_loader, device, gt=val_annotations,
@@ -1017,12 +1033,13 @@ def train(cfg: TrainConfig) -> Tuple[CropCounter, Dict[str, List[float]], str, i
                     progress=True, desc=f"val {epoch}/{cfg.epochs}",
                 )
             else:
-                summary, _ = evaluate(
+                summary, point_rows = evaluate(
                     model, val_loader, device, tau=cfg.tau, k=cfg.k,
                     nms_radius=cfg.nms_radius, output_stride=cfg.output_stride,
                     match_radius_px=cfg.match_radius_px,
                     focal_alpha=cfg.focal_alpha, focal_beta=cfg.focal_beta,
                     progress=True, desc=f"val {epoch}/{cfg.epochs}",
+                    detect_tau=cfg.ap_tau,
                 )
 
             _append_history(history, cfg.task, train_loss, lr_now, summary)
@@ -1038,9 +1055,16 @@ def train(cfg: TrainConfig) -> Tuple[CropCounter, Dict[str, List[float]], str, i
                                  best_epoch=best_epoch)
                 if cfg.task == "box":
                     write_coco_results(detections, run_dir / "predictions.json")
+                else:
+                    _write_point_predictions(cfg, point_rows, run_dir / "predictions.json")
                 marker = "  <- best"
-            if cfg.task == "box" and epoch == cfg.epochs:
-                write_coco_results(detections, run_dir / "predictions_last.json")
+            if epoch == cfg.epochs:
+                if cfg.task == "box":
+                    write_coco_results(detections, run_dir / "predictions_last.json")
+                else:
+                    _write_point_predictions(
+                        cfg, point_rows, run_dir / "predictions_last.json"
+                    )
             _save_checkpoint(model, cfg, run_dir / "last.pt", epoch=epoch,
                              history=history, best_metric=best_metric,
                              best_epoch=best_epoch, resume_state=resume_state)

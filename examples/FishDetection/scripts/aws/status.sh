@@ -4,6 +4,9 @@
 #
 #   ./status.sh          last 80 log lines
 #   ./status.sh 1000     last 1000
+#
+# For projected wall time and cost from the run's measured it/s, see
+# ../watch_run.py — this script does not do arithmetic, it just shows the box.
 set -euo pipefail
 
 REGION="${REGION:-us-east-1}"
@@ -78,3 +81,11 @@ fi
 
 echo "--- synced history.json in $S3_URI/runs ---"
 aws s3 ls --region "$S3_REGION" --recursive "$S3_URI/runs" | grep history.json || echo "(none yet)"
+
+# This script answers "is the box alive and what is it printing". What it costs
+# is a different question, and the one that decides whether to let a run carry
+# on — watch_run.py reads the synced log and re-costs from measured throughput.
+echo
+echo "--- re-cost from measured throughput ---"
+echo "  python $HERE/../watch_run.py --s3 $S3_URI/runs/run_all.log --val-freq 2"
+echo "  (add --follow 600 to keep watching; exits 1 on an alarm, 2 if the run FAILED)"

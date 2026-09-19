@@ -244,19 +244,47 @@ class _ConvBlock(nn.Sequential):
 class PyramidDecoder(nn.Module):
     """U-Net-style fusion decoder over an FPN-style lateral pyramid -> 1-channel logits.
 
-    A hybrid: 1x1 lateral projections bring every backbone stage to a uniform
-    ``c_dec`` width (the FPN trait), then a bilinear x2 top-down ladder from
+    A hybrid: 1x1 lateral projections bring every backbone stage to the
+    decoder's width (the FPN trait), then a bilinear x2 top-down ladder from
     stride 32 to stride 4 *concatenates* each same-stride lateral and applies a
     double conv block (the U-Net trait). A single head emits fine-scale logits
     rather than per-level predictions. With ``output_stride=2`` one extra
     skip-less upsample+conv block is added (ConvNeXt has no stride-2 features
     to fuse).
 
-    ``task="box"`` adds a second branch off the same fused map::
+    **Width can vary per ladder step.** ``c_dec`` takes either one int (every
+    step that width — the original behaviour) or three ints ordered coarse to
+    fine: ``(stride 16, stride 8, stride 4)``.
 
-        x (c_dec, stride 4)
-        |-- head     : Conv1x1(c_dec -> 1)                          peak logits
-        `-- geometry : Conv3x3(c_dec -> 128) -> GN(32) -> GELU
+    The reason is that cost is wildly uneven along the ladder, because each
+    step runs at 4x the pixels of the one above it. Measured on ConvNeXt-Tiny
+    at 1024x576 with a uniform ``c_dec=192``, of the decoder's 98.9 GFLOPs:
+
+    =====================  =======  =======
+    ladder step            GFLOPs   share
+    =====================  =======  =======
+    fuse block, stride 16      4.6    4.6%
+    fuse block, stride 8      18.3   18.6%
+    fuse block, stride 4      73.4   74.2%
+    laterals + head            2.6    2.6%
+    =====================  =======  =======
+
+    So widening the whole ladder spends roughly three quarters of the extra
+    compute on the one step where compute is dearest. A taper — wide where the
+    maps are small, narrow where they are large — buys most of the parameters
+    for a fraction of the FLOPs. Whether that trade helps accuracy is an
+    empirical question; this only makes it askable.
+
+    Every width must divide by the ``_ConvBlock`` GroupNorm group count (32),
+    and a single int reproduces the previous module exactly — same submodules,
+    same ``state_dict`` keys and shapes — so existing checkpoints load unchanged.
+
+    ``task="box"`` adds a second branch off the same fused map, at the FINEST
+    width ``w4`` (what the ladder actually hands it)::
+
+        x (w4, stride 4)
+        |-- head     : Conv1x1(w4 -> 1)                             peak logits
+        `-- geometry : Conv3x3(w4 -> 128) -> GN(32) -> GELU
                        -> Conv1x1(128 -> 4)   channels 0:2 = wh, 2:4 = off
 
     ``head`` keeps its name, module and -4.0 bias in both tasks, so the point
@@ -266,10 +294,13 @@ class PyramidDecoder(nn.Module):
     #: The two prediction tasks. ``"point"`` must stay free of extra parameters.
     TASKS = ("point", "box")
 
+    #: GroupNorm groups inside :class:`_ConvBlock`; every width must divide by it.
+    NORM_GROUPS = 32
+
     def __init__(
         self,
         stage_channels: Sequence[int],
-        c_dec: int = 192,
+        c_dec: Union[int, Sequence[int]] = 192,
         output_stride: int = 4,
         task: str = "point",
     ) -> None:
@@ -281,13 +312,31 @@ class PyramidDecoder(nn.Module):
         self.output_stride = output_stride
         self.task = task
 
-        self.laterals = nn.ModuleList(
-            [nn.Conv2d(c, c_dec, kernel_size=1) for c in stage_channels]
+        #: Decoder width at each ladder step, coarse to fine: stride 16, 8, 4.
+        self.level_widths = self._resolve_widths(c_dec)
+        w16, w8, w4 = self.level_widths
+
+        # A lateral is projected to the width of whatever consumes it: stage 3
+        # seeds the ladder and stage 2 is concatenated into the first block, so
+        # both feed the stride-16 step; stage 1 feeds stride 8 and stage 0
+        # feeds stride 4. One uniform width collapses this to the original
+        # all-``c_dec`` projection.
+        lateral_widths = (w4, w8, w16, w16)
+        self.laterals = nn.ModuleList([
+            nn.Conv2d(c, w, kernel_size=1)
+            for c, w in zip(stage_channels, lateral_widths)
+        ])
+        # One fuse block per ladder step: stride 16, 8, 4. Each consumes the
+        # upsampled map from the step above, concatenated with its own lateral.
+        self.blocks = nn.ModuleList([
+            _ConvBlock(w16 + w16, w16, groups=self.NORM_GROUPS),
+            _ConvBlock(w16 + w8, w8, groups=self.NORM_GROUPS),
+            _ConvBlock(w8 + w4, w4, groups=self.NORM_GROUPS),
+        ])
+        self.refine = (
+            _ConvBlock(w4, w4, groups=self.NORM_GROUPS) if output_stride == 2 else None
         )
-        # One fuse block per ladder step: stride 16, 8, 4.
-        self.blocks = nn.ModuleList([_ConvBlock(2 * c_dec, c_dec) for _ in range(3)])
-        self.refine = _ConvBlock(c_dec, c_dec) if output_stride == 2 else None
-        self.head = nn.Conv2d(c_dec, 1, kernel_size=1)
+        self.head = nn.Conv2d(w4, 1, kernel_size=1)
         # Focal-style prior: start predicting p ~ 0.02 everywhere so the
         # dominant negatives don't swamp early training.
         nn.init.constant_(self.head.bias, -4.0)
@@ -297,7 +346,7 @@ class PyramidDecoder(nn.Module):
         self.geometry: Optional[nn.Sequential] = None
         if task == "box":
             self.geometry = nn.Sequential(
-                nn.Conv2d(c_dec, GEOMETRY_WIDTH, kernel_size=3, padding=1),
+                nn.Conv2d(w4, GEOMETRY_WIDTH, kernel_size=3, padding=1),
                 nn.GroupNorm(32, GEOMETRY_WIDTH),
                 nn.GELU(),
                 nn.Conv2d(GEOMETRY_WIDTH, 4, kernel_size=1),
@@ -311,6 +360,31 @@ class PyramidDecoder(nn.Module):
                 # unlearn on every object.
                 self.geometry[-1].bias.zero_()
                 self.geometry[-1].bias[2:].fill_(OFFSET_BIAS_INIT)
+
+    @classmethod
+    def _resolve_widths(cls, c_dec: Union[int, Sequence[int]]) -> Tuple[int, int, int]:
+        """Normalise ``c_dec`` to three per-step widths, coarse to fine."""
+        # bool is an int subclass and would silently become a width of 0 or 1.
+        if isinstance(c_dec, bool):
+            raise TypeError("c_dec must be an int or a sequence of 3 ints, got a bool")
+        if isinstance(c_dec, int):
+            widths: Tuple[int, ...] = (c_dec, c_dec, c_dec)
+        else:
+            widths = tuple(int(w) for w in c_dec)
+            if len(widths) != 3:
+                raise ValueError(
+                    "c_dec as a sequence gives one width per ladder step "
+                    f"(stride 16, 8, 4) — expected 3, got {len(widths)}"
+                )
+        for w in widths:
+            if w <= 0:
+                raise ValueError(f"decoder widths must be positive, got {widths}")
+            if w % cls.NORM_GROUPS:
+                raise ValueError(
+                    f"every decoder width must divide by {cls.NORM_GROUPS} "
+                    f"(the _ConvBlock GroupNorm group count), got {widths}"
+                )
+        return widths[0], widths[1], widths[2]
 
     def freeze_fusion(self) -> "PyramidDecoder":
         """Freeze the fusion trunk, leaving only ``head`` (+ ``geometry``) trainable.
@@ -363,7 +437,7 @@ class CropCounter(nn.Module):
         self,
         backbone_size: str = "base",
         weights_dir: Optional[Path] = None,
-        c_dec: int = 192,
+        c_dec: Union[int, Sequence[int]] = 192,
         output_stride: int = 4,
         task: str = "point",
         backbone_trainable: bool = False,

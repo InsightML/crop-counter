@@ -1,0 +1,10 @@
+start 2026-09-13T16:01:55Z
+[run ] manifest
+[gate] train: 161911/161975 images on disk (100.0%)
+[run ] train cfd17_frozen_s0 — fresh
+backbone base frozen: 0.00M | decoder params: 3.58M | select on ap50 | device cuda | autocast bfloat16
+epoch 1/8: 100%|█████████▉| 20137/20238 [25:25<00:07, 13.43it/s, loss=1.8474, n_pos=11.8]
+epoch   1 | loss 1.8458 val 1.4914 | AP 0.276 AP50 0.615 AP75 0.202 AR100 0.427 | P 0.713 R 0.562 F1 0.628 MAE 0.70 | lr 5.50e-04  <- best
+val 1/8: 100%|█████████▉| 36452/36632 [12:19<00:03, 47.64it/s]
+epoch 2/8:  10%|▉         | 1999/20238 [02:32<23:01, 13.20it/s, loss=1.9653, n_pos=11.8]
+epoch   2 | loss 1.6627 val 1.4415 | AP 0.326 AP50 0.645 AP75 0.290 AR100 0.486 | P 0.718 R 0.602 F1 0.655 MAE 0.68 | lr 1.00e-03  <- best

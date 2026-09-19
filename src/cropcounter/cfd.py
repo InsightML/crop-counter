@@ -5,18 +5,20 @@ CFD harmonises ~17 marine/freshwater source datasets into ONE COCO json:
 is ~1.1 GB uncompressed, so every pass here is **streamed** with ijson — the
 whole document is never held in memory.
 
-Three subcommands, all deterministic under ``--seed``::
+Four subcommands, all deterministic under ``--seed``::
 
     python -m cropcounter.cfd manifest --metadata cfd.json.zip --out reports/
     python -m cropcounter.cfd subset   --metadata cfd.json.zip --out data/brackish \\
         --sources brackish --train-cap 20000 --val-cap 4000
     python -m cropcounter.cfd fetch    --subset data/brackish --max-side 1024
+    python -m cropcounter.cfd points   --subset data/brackish --out data/brackish_points
 
 ``manifest`` profiles every source (box sizes, emptiness, train/val balance,
 licence, and the stride-4 centre-cell collision rate a point/centre head would
 actually see). ``subset`` writes standard COCO for the sources you pick.
 ``fetch`` pulls the pixels, resizes on write, and rescales the annotations to
-match.
+match. ``points`` turns a FETCHED subset's box centres into a COCO keypoints
+data root beside it, symlinking rather than copying the pixels.
 
 The output layout is the repo's usual filesystem split (see
 :mod:`cropcounter.crop_dataset`)::
@@ -1294,6 +1296,255 @@ def fetch_subset(
 
 
 # --------------------------------------------------------------------------- #
+# points
+# --------------------------------------------------------------------------- #
+
+#: Filename of the per-split original-id -> int-id map written by
+#: :func:`write_points_root`. The conversion renumbers ids, so this is the only
+#: way back to the master (``cfd_image_id`` on each image record is the other).
+ID_MAP_FILENAME = "cfd_id_map.json"
+
+#: Filename of the per-split conversion summary.
+POINTS_SUMMARY_FILENAME = "points_summary.json"
+
+
+def _has_bbox(ann: Dict[str, Any]) -> bool:
+    """Whether an annotation carries a usable four-number ``bbox``."""
+    bbox = ann.get("bbox")
+    return bool(bbox) and len(bbox) >= 4
+
+
+def _unboxed_image_ids(document: Dict[str, Any]) -> Set[Any]:
+    """Ids of images in ``document`` with no bbox annotation (the empty frames)."""
+    boxed = {ann.get("image_id") for ann in document.get("annotations", ()) if _has_bbox(ann)}
+    return {img.get("id") for img in document.get("images", ())} - boxed
+
+
+def bbox_centres_to_keypoints(
+    document: Dict[str, Any],
+    category_name: str = "fish",
+    drop_empty: bool = False,
+) -> Tuple[Dict[str, Any], Dict[Any, int]]:
+    """Convert a fetched CFD **bbox** COCO document into a COCO **keypoints** one.
+
+    Returns ``(keypoints_document, id_map)``. Each box becomes one annotation
+    whose ``keypoints`` is the box centre ``[cx, cy, 2]`` (``cx = x + w/2``,
+    ``cy = y + h/2``) with ``num_keypoints`` 1; ``bbox`` and ``area`` ride along
+    untouched (harmless to the point loader, and useful for later box work).
+
+    Two things are deliberately fixed **here**, at conversion time, rather than
+    in the loader:
+
+    * **Ids are renumbered** to consecutive 1-based ints in file order, images
+      and annotations alike. ``crop_dataset.parse_coco_keypoints`` does
+      ``int(image["id"])``, and CFD ids are *strings*
+      (``"torsi_20190716-021037.129.JPG"``), which raises ``ValueError``. The
+      original id is kept on every image record as ``cfd_image_id`` (and on
+      every annotation as ``cfd_annotation_id``), and ``id_map`` maps original
+      id -> new int, so the join back to the master survives.
+    * **A bbox-only document loads silently EMPTY** — it has no ``keypoints``
+      key at all, so the loader builds one record per image and attaches nothing.
+      Writing real ``keypoints`` is the only thing that makes the point task
+      see the data.
+
+    **A box whose CENTRE falls outside the image is dropped**, and the count
+    is reported as ``n_dropped_outside_frame``. CFD really contains these — 47
+    of 222,152 train boxes and 1 of 52,038 val boxes in the capped all-17
+    subset, the worst 454px outside a 1024x683 frame. The box task never
+    noticed, because albumentations silently drops a box below
+    ``min_bbox_visibility``; the point task dies, because ``KeypointParams``
+    raises on an out-of-range keypoint. They are dropped rather than clipped
+    for a modelling reason, not a convenience one: a centre outside the frame
+    has no cell in the stride-4 heatmap to occupy, and clipping it to the
+    border would train the head to fire at image edges where nothing is. A box
+    that merely clips the edge keeps its centre and is unaffected.
+
+    Empty frames (images with no box) are **retained by default** as image
+    records with no annotation, which is how standard COCO says "nothing here"
+    and what gives the heatmap head its negatives. ``drop_empty=True`` removes
+    them — an escape hatch for a crowd-only ablation, not the default.
+
+    Every extra per-image field CFD carries (``dataset``, ``is_train``,
+    ``cfd_sequence``, ``cfd_scale``, ``cfd_file_name``, ``original_data_source``,
+    width/height) is passed through verbatim.
+
+    Raises:
+        ValueError: if any image record lacks ``cfd_scale``, i.e. the subset has
+            not been through ``fetch``. Before ``fetch`` the geometry is in
+            published pixels and ``file_name`` still carries the master's
+            ``JPEGImages/`` prefix, so the points would not match the files on
+            disk — and there would be no files on disk to match.
+    """
+    images_in = list(document.get("images", ()))
+    unfetched = [img.get("id") for img in images_in if "cfd_scale" not in img]
+    if unfetched:
+        raise ValueError(
+            f"{len(unfetched)} of {len(images_in)} image record(s) have no "
+            f"'cfd_scale' (e.g. {unfetched[0]!r}): this subset has not been "
+            "through `fetch`, so its geometry is in published pixels and its "
+            "file_name still carries the master's JPEGImages/ prefix. Run "
+            "`python -m cropcounter.cfd fetch --subset <dir>` first."
+        )
+
+    # Frame sizes, for the centre-inside-the-image test below. An image with no
+    # width/height recorded has no bound to test against, so its points are
+    # kept — a missing field must never silently empty a split.
+    sizes: Dict[Any, Tuple[float, float]] = {}
+    for image in images_in:
+        width, height = image.get("width"), image.get("height")
+        if width and height:
+            sizes[image.get("id")] = (float(width), float(height))
+
+    unboxed = _unboxed_image_ids(document)
+    images: List[Dict[str, Any]] = []
+    id_map: Dict[Any, int] = {}
+    for image in images_in:
+        original = image.get("id")
+        if drop_empty and original in unboxed:
+            continue
+        new_id = len(images) + 1
+        record = dict(image)
+        record["id"] = new_id
+        record["cfd_image_id"] = original
+        images.append(record)
+        id_map[original] = new_id
+
+    annotations: List[Dict[str, Any]] = []
+    dropped_outside = 0
+    for ann in document.get("annotations", ()):
+        if not _has_bbox(ann):
+            continue
+        image_id = id_map.get(ann.get("image_id"))
+        if image_id is None:  # its image was dropped, or is not in this document
+            continue
+        x, y, w, h = (float(v) for v in ann["bbox"][:4])
+        centre_x, centre_y = x + w / 2.0, y + h / 2.0
+        frame = sizes.get(ann.get("image_id"))
+        if frame is not None and not (
+            0 <= centre_x < frame[0] and 0 <= centre_y < frame[1]
+        ):
+            dropped_outside += 1
+            continue
+        record = dict(ann)
+        record["cfd_annotation_id"] = ann.get("id")
+        record["id"] = len(annotations) + 1
+        record["image_id"] = image_id
+        record["category_id"] = 1
+        record["keypoints"] = [centre_x, centre_y, 2]
+        record["num_keypoints"] = 1
+        annotations.append(record)
+
+    out = dict(document)
+    out["images"] = images
+    out["annotations"] = annotations
+    out["categories"] = [
+        {"id": 1, "name": category_name, "keypoints": [category_name], "skeleton": []}
+    ]
+    out["n_dropped_outside_frame"] = dropped_outside
+    if dropped_outside:
+        print(f"  dropped {dropped_outside} box centre(s) outside their frame")
+    return out, id_map
+
+
+def _place_images(source: Path, dest: Path, copy: bool = False) -> None:
+    """Point ``dest`` at ``source``: an absolute symlink, or a real copy."""
+    import shutil
+
+    source = Path(source).resolve()
+    if not source.is_dir():
+        raise FileNotFoundError(f"no images directory to link: {source}")
+    if dest.is_symlink() or dest.is_file():
+        dest.unlink()
+    elif dest.is_dir():
+        shutil.rmtree(dest)
+    if copy:
+        shutil.copytree(source, dest)
+    else:
+        dest.symlink_to(source, target_is_directory=True)
+
+
+def write_points_root(
+    subset_dir: Path,
+    out_dir: Path,
+    category: str = "fish",
+    drop_empty: bool = False,
+    copy_images: bool = False,
+) -> Dict[str, Any]:
+    """Write a **separate** point-task data root beside a fetched bbox subset.
+
+    Library entry point for the ``points`` subcommand::
+
+        from cropcounter.cfd import write_points_root
+        write_points_root("data/brackish", "data/brackish_points")
+
+    Produces, for each of ``train``/``val`` present under ``subset_dir``::
+
+        <out>/
+        ├─ train/annotations.json   # COCO keypoints, int ids
+        ├─ train/images -> <subset>/train/images   (absolute symlink)
+        ├─ val/ ...
+        ├─ cfd_id_map.json          # per split: original id -> new int id
+        └─ points_summary.json      # per split: counts, category, source subset
+
+    A **separate root** is not cosmetic: ``crop_dataset.resolve_annotations``
+    picks ``annotations.json`` first, so a points file sitting next to the bbox
+    one in ``<subset>/<split>/`` could never be the file the loader opens.
+    ``images`` is a symlink rather than a copy so the pixels are not duplicated;
+    ``copy_images=True`` makes real copies (for a Drive/zip hand-off, where
+    symlinks do not travel).
+
+    Returns the summary dict (also written to ``points_summary.json``).
+    """
+    subset_dir = Path(subset_dir).resolve()
+    out_dir = Path(out_dir)
+    id_maps: Dict[str, Dict[str, int]] = {}
+    summary: Dict[str, Any] = {}
+
+    for split in SPLIT_NAMES:
+        split_in = subset_dir / split
+        annotation_path = split_in / "annotations.json"
+        if not annotation_path.is_file():
+            continue
+        document = json.loads(annotation_path.read_text(encoding="utf-8"))
+        n_empty_source = len(_unboxed_image_ids(document))
+        points, id_map = bbox_centres_to_keypoints(
+            document, category_name=category, drop_empty=drop_empty
+        )
+
+        split_out = out_dir / split
+        split_out.mkdir(parents=True, exist_ok=True)
+        (split_out / "annotations.json").write_text(
+            json.dumps(points, indent=1), encoding="utf-8"
+        )
+        _place_images(split_in / IMAGES_DIRNAME, split_out / IMAGES_DIRNAME, copy_images)
+
+        id_maps[split] = {str(k): v for k, v in id_map.items()}
+        summary[split] = {
+            "n_images": len(points["images"]),
+            "n_points": sum(int(a["num_keypoints"]) for a in points["annotations"]),
+            "n_dropped_outside_frame": int(points["n_dropped_outside_frame"]),
+            "n_empty": 0 if drop_empty else n_empty_source,
+            "dropped_empty": n_empty_source if drop_empty else 0,
+            "category": category,
+            "subset": str(split_in),
+        }
+
+    if not summary:
+        raise FileNotFoundError(
+            f"no split with an annotations.json under {subset_dir}; expected "
+            f"{'/'.join(SPLIT_NAMES)} sub-folders written by `subset` + `fetch`"
+        )
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / ID_MAP_FILENAME).write_text(json.dumps(id_maps, indent=1), encoding="utf-8")
+    (out_dir / POINTS_SUMMARY_FILENAME).write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
+    print(json.dumps(summary, indent=2))
+    return summary
+
+
+# --------------------------------------------------------------------------- #
 # Progress + CLI
 # --------------------------------------------------------------------------- #
 
@@ -1371,6 +1622,20 @@ def build_parser():
     p_fetch.add_argument("--jpeg-quality", type=int, default=90)
     p_fetch.add_argument("--retries", type=int, default=3)
     p_fetch.add_argument("--no-progress", dest="progress", action="store_false")
+
+    p_points = sub.add_parser(
+        "points", help="bbox centres -> COCO keypoints, in a separate data root"
+    )
+    p_points.add_argument("--subset", type=Path, required=True,
+                          help="a FETCHED subset output directory")
+    p_points.add_argument("--out", type=Path, required=True,
+                          help="the point-task data root to write (never the subset itself)")
+    p_points.add_argument("--category", default="fish",
+                          help="keypoint category name (default: fish)")
+    p_points.add_argument("--drop-empty", action="store_true",
+                          help="drop images with no box instead of keeping them as negatives")
+    p_points.add_argument("--copy-images", action="store_true",
+                          help="copy the pixels instead of symlinking them")
     return parser
 
 
@@ -1387,11 +1652,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             group_by_sequence=args.group_by_sequence,
             seed=args.seed, progress=args.progress,
         )
-    else:
+    elif args.command == "fetch":
         fetch_subset(
             args.subset, max_side=args.max_side, workers=args.workers,
             mirror=args.mirror, jpeg_quality=args.jpeg_quality,
             retries=args.retries, progress=args.progress,
+        )
+    else:
+        write_points_root(
+            args.subset, args.out, category=args.category,
+            drop_empty=args.drop_empty, copy_images=args.copy_images,
         )
     return 0
 

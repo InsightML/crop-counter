@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # EC2 user-data for the CFD-17 benchmark box. cloud-init runs this as ROOT on
-# first boot; launch.sh substitutes the four __PLACEHOLDER__ values into a temp
+# first boot; launch.sh fills the placeholder values in below into a temp
 # copy before passing it as --user-data.
 #
 # Everything after the disk setup runs as the `ubuntu` user, because the DLAMI's
@@ -18,10 +18,28 @@ CODE_KEY="${CODE_KEY:-__CODE_KEY__}"
 
 REGION="${REGION:-__REGION__}"            # where this box runs
 S3_REGION="${S3_REGION:-__S3_REGION__}"   # where the bucket lives (us-east-1)
+# Which runs this box does, forwarded from launch.sh. Empty means "whatever
+# run_all.sh defaults to" — the frozen + unfrozen pair. Without this the RUNS
+# list added for the trunk-size sweep could only be changed by editing the
+# script, which is how a head-phase launch would otherwise have quietly
+# trained the WRONG configs on a $2.50/h box.
+RUNS="${RUNS:-__RUNS__}"
+RUN_BASELINES="${RUN_BASELINES:-__RUN_BASELINES__}"
+MEASURE_SIZES="${MEASURE_SIZES:-__MEASURE_SIZES__}"
+EPOCHS="${EPOCHS:-__EPOCHS__}"
+# Dead-man's switch. NOTHING in this pipeline shuts the box down: run_all.sh
+# finishes and the instance keeps billing at ~$2.50/h until someone runs
+# teardown.sh. A launch that lands while nobody is watching would otherwise
+# burn ~$60/day indefinitely. Paired with --instance-initiated-shutdown-behavior
+# terminate, this scheduled shutdown terminates the instance.
+# Generous on purpose: the run is ~5.8 h, so 10 h still leaves a failed run
+# several hours to be inspected in before it disappears.
+MAX_WALL_HOURS="${MAX_WALL_HOURS:-__MAX_WALL_HOURS__}"
 SSM_REGION="${SSM_REGION:-eu-west-2}"     # the MLflow SecureStrings live here
 NVME="${NVME:-/opt/dlami/nvme}"
 
 echo "=== cfd bootstrap $(date -u '+%Y-%m-%dT%H:%M:%SZ') branch=$BRANCH code=$CODE_KEY resume=$RESUME ==="
+echo "runs=${RUNS:-<run_all defaults>} baselines=${RUN_BASELINES:-<default>} epochs=${EPOCHS:-<default>}"
 
 # --- instance store --------------------------------------------------------- #
 mkdir -p "$NVME"
@@ -53,6 +71,8 @@ aws --version
 sudo -u ubuntu -H env \
     BRANCH="$BRANCH" S3_URI="$S3_URI" RESUME="$RESUME" CODE_KEY="$CODE_KEY" \
     REGION="$REGION" S3_REGION="$S3_REGION" SSM_REGION="$SSM_REGION" NVME="$NVME" \
+    RUNS="$RUNS" RUN_BASELINES="$RUN_BASELINES" \
+    MEASURE_SIZES="$MEASURE_SIZES" EPOCHS="$EPOCHS" \
     bash -s <<'UBUNTU'
 set -euo pipefail
 REPO_DIR="$NVME/crop-counter"
@@ -163,6 +183,12 @@ unset MLFLOW_PW
 
 # --- go --------------------------------------------------------------------- #
 export DATA_ROOT="$NVME/cfd17" RUNS_DIR="$NVME/runs" RESULTS_DIR="$NVME/results"
+# Exported only when non-empty: an empty RUNS would override run_all.sh's
+# default with nothing and train no models at all.
+if [ -n "$RUNS" ]; then export RUNS; fi
+if [ -n "$RUN_BASELINES" ]; then export RUN_BASELINES; fi
+if [ -n "$MEASURE_SIZES" ]; then export MEASURE_SIZES; fi
+if [ -n "$EPOCHS" ]; then export EPOCHS; fi
 export S3_URI DEVICE=cuda
 # run_all.sh's `aws s3 sync` calls carry no --region: the high-level s3 commands
 # resolve the bucket's region themselves, but a default region must exist.
@@ -173,5 +199,14 @@ setsid nohup bash "$REPO_DIR/examples/FishDetection/scripts/run_all.sh" \
     < /dev/null > "$NVME/run_all.nohup" 2>&1 &
 echo "run_all.sh started (pid $!); log at $NVME/runs/run_all.log"
 UBUNTU
+
+# --- dead-man's switch ------------------------------------------------------ #
+if [ -n "${MAX_WALL_HOURS:-}" ] && [ "${MAX_WALL_HOURS}" != "0" ]; then
+    shutdown -h "+$(( MAX_WALL_HOURS * 60 ))" "cfd dead-man's switch: ${MAX_WALL_HOURS}h wall limit" \
+        && echo "dead-man's switch armed: terminating in ${MAX_WALL_HOURS}h (cancel with 'shutdown -c')" \
+        || echo "WARNING: could not arm the dead-man's switch — this box will bill until teardown.sh"
+else
+    echo "WARNING: no dead-man's switch (MAX_WALL_HOURS empty) — this box bills until teardown.sh"
+fi
 
 echo "=== cfd bootstrap handed off $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="

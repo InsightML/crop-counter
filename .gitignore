@@ -13,6 +13,11 @@ weights/timm/
 # Training artifacts.
 /runs/
 notebooks/runs/
+# Local smoke/scoring output: run_all.sh's RUNS_DIR/RESULTS_DIR pointed at the
+# laptop. launch.sh refuses a dirty tree, so these must not show up as untracked.
+/runs_*/
+/results/
+/results_*/
 
 # Secrets.
 .env

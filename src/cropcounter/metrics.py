@@ -7,6 +7,8 @@ with poor localization means compensating errors, not a good model.
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -124,12 +126,23 @@ def evaluate(
     focal_beta: float = 4.0,
     progress: bool = False,
     desc: str = "val",
+    detect_tau: Optional[float] = None,
 ) -> Tuple[Dict[str, float], List[Dict]]:
     """Evaluate counting + localization over a whole-image val loader.
 
     Also averages the penalty-reduced focal loss against the heatmap targets,
     a tau-independent measure of heatmap fidelity, reported as ``val_loss``.
     Set ``progress`` to show a per-image tqdm bar labelled ``desc``.
+
+    Args:
+        detect_tau: when given, each row also carries ``"detections"`` — an
+            ``(N, 3)`` list of ``[x, y, score]`` decoded at THIS threshold
+            rather than at ``tau``. Set it low (0.01, as the box task's
+            ``ap_tau`` is) and every operating threshold above it can be swept
+            offline as a mask over a detection set already on disk, which is
+            what makes point scoring a CPU-only job after the box is gone.
+            The metrics in ``summary`` are unaffected — they are always decoded
+            at ``tau``.
 
     Returns:
         (summary, per_image_rows). Summary keys: count_mae, count_rmse,
@@ -141,17 +154,75 @@ def evaluate(
         model, loader, device, focal_alpha=focal_alpha, focal_beta=focal_beta,
         progress=progress, desc=desc,
     ):
+        row: Dict = {"name": name}
+        if detect_tau is not None:
+            # Decoded once at the low threshold; the operating-point decode
+            # below is a strict subset of it, so this costs no extra forward.
+            det_pts, det_scores = decode_peaks(
+                prob, k=k, tau=detect_tau, nms_radius=nms_radius, stride=output_stride
+            )
+            row["detections"] = [
+                [float(x), float(y), float(score)]
+                for (x, y), score in zip(det_pts, det_scores)
+            ]
         pred, _ = decode_peaks(prob, k=k, tau=tau, nms_radius=nms_radius, stride=output_stride)
         tp, fp, fn = match_points(pred, gt, match_radius_px)
-        rows.append({
-            "name": name, "n_gt": len(gt), "n_pred": len(pred),
-            "tp": tp, "fp": fp, "fn": fn,
+        row.update({
+            "n_gt": len(gt), "n_pred": len(pred), "tp": tp, "fp": fp, "fn": fn,
         })
+        rows.append(row)
         if loss is not None:
             losses.append(loss)
     summary = _summarise(rows)
     summary["val_loss"] = float(np.mean(losses)) if losses else float("nan")
     return summary, rows
+
+
+def write_point_results(
+    rows: Sequence[Dict],
+    path: Path,
+    *,
+    detect_tau: float,
+    output_stride: int,
+    nms_radius: float,
+    k: int,
+) -> Path:
+    """Write a point run's per-image detections — the box task's results file.
+
+    Keyed by image **file name**, not COCO image id: the point loader carries
+    the name and the ids differ between a ``cfd points`` root (renumbered ints)
+    and the bbox root the scoring joins against (CFD's original strings). File
+    names are shared between the two and unique within a split — one flat
+    ``images/`` directory per split makes them so — which is what lets a point
+    run be scored against box ground truth without a second id map.
+
+    The decode settings ride along in the header because a threshold sweep over
+    this file is only honest if the reader knows the floor it was cut at.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "detect_tau": float(detect_tau),
+        "output_stride": int(output_stride),
+        "nms_radius": float(nms_radius),
+        "k": int(k),
+        "points": {
+            str(row["name"]): row.get("detections", []) for row in rows
+        },
+    }
+    with path.open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh)
+    return path
+
+
+def read_point_results(path: Path) -> Dict[str, np.ndarray]:
+    """Read :func:`write_point_results` back as ``{name: (N, 3) x/y/score}``."""
+    with Path(path).open(encoding="utf-8") as fh:
+        payload = json.load(fh)
+    return {
+        name: np.asarray(points, dtype=float).reshape(-1, 3)
+        for name, points in payload["points"].items()
+    }
 
 
 def sweep_tau(

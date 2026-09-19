@@ -673,3 +673,189 @@ def test_save_checkpoint_is_atomic(stub_backbone, tmp_path, monkeypatch):
     assert path.read_bytes() == original, "the previous checkpoint was overwritten"
     restored = torch.load(path, map_location="cpu", weights_only=False)
     assert restored["decoder"], "the surviving checkpoint must still load"
+
+
+# --- 10: F1 selection on the POINT task --------------------------------------
+#
+# The CFD-17 head-phase run is the first to pair ``task="point"`` with
+# ``select_on="f1"``. The table already allows it (``val_f1`` is in
+# ``HISTORY_KEYS["point"]``), but nothing had ever run a point training loop
+# through that branch end to end — and val loss has now picked the wrong epoch
+# on three different architectures, so this is the seam that stops it happening
+# a fourth time.
+
+
+@pytest.fixture
+def tiny_point_data(tmp_path):
+    """A 5-image synthetic COCO **keypoints** split: 3 train, 2 val.
+
+    Deliberately shaped like a ``cfd points`` root — int ids, one ``fish``
+    category, a visible keypoint per object, and one empty val frame so the
+    negatives path runs too.
+    """
+    rng = np.random.default_rng(0)
+    root = tmp_path / "point_data"
+    for split, count in (("train", 3), ("val", 2)):
+        images_dir = root / split / "images"
+        images_dir.mkdir(parents=True)
+        images, annotations = [], []
+        for i in range(count):
+            name = f"{split}_{i}.png"
+            cv2.imwrite(str(images_dir / name),
+                        rng.integers(0, 255, (SIDE, SIDE, 3), dtype=np.uint8))
+            images.append({"id": i + 1, "file_name": name,
+                           "width": SIDE, "height": SIDE})
+            if split == "val" and i == count - 1:
+                continue  # one genuinely empty frame
+            for j in range(2):
+                annotations.append({
+                    "id": len(annotations) + 1, "image_id": i + 1,
+                    "category_id": 1, "keypoints": [16.0 + 32 * j, 26.0 + 28 * j, 2],
+                    "num_keypoints": 1,
+                })
+        (root / split / "annotations.json").write_text(
+            json.dumps({
+                "images": images, "annotations": annotations,
+                "categories": [{"id": 1, "name": "fish",
+                                "keypoints": ["fish"], "skeleton": []}],
+            }),
+            encoding="utf-8",
+        )
+    return root
+
+
+def _point_cfg(data_root: Path, out_dir: Path, **overrides) -> TrainConfig:
+    """A minimal but genuine point run, shaped like the CFD-17 head-phase config."""
+    settings = dict(
+        data_root=data_root, out_dir=out_dir, annotation_format="coco",
+        task="point", labels=("fish",), select_on="f1", c_dec=32, tile=64,
+        tiles_per_image=1, batch_size=1, num_workers=0, device="cpu", epochs=2,
+        warmup_epochs=1, seed=0,
+    )
+    settings.update(overrides)
+    return TrainConfig(**settings)
+
+
+def test_a_point_run_selects_on_f1_end_to_end(stub_backbone, tiny_point_data, tmp_path):
+    """``best.pt`` is the F1-best epoch, and carries that F1 as its best_metric."""
+    out = tmp_path / "runs"
+    _m, history, _n, best_epoch = train(
+        _point_cfg(tiny_point_data, out, run_name="pts")
+    )
+    f1s = history["val_f1"]
+    assert len(f1s) == 2 and all(np.isfinite(f1s))
+    assert best_epoch == int(np.argmax(f1s)) + 1
+
+    payload = _payload(out / "pts" / "best.pt")
+    assert payload["best_epoch"] == best_epoch
+    assert payload["best_metric"] == pytest.approx(max(f1s))
+    assert payload["config"]["select_on"] == "f1"
+
+
+def test_point_selection_on_f1_and_on_val_loss_each_optimise_their_own_metric(
+    stub_backbone, tiny_point_data, tmp_path
+):
+    """The point of the fix: the two criteria read different columns.
+
+    They may agree on this toy data — what must hold is that each run's
+    ``best_epoch`` is optimal *for the metric it selected on*, which is exactly
+    what val-loss selection failed to be for the real runs.
+    """
+    out = tmp_path / "runs"
+    _m, f1_history, _n, f1_best = train(
+        _point_cfg(tiny_point_data, out, run_name="on_f1", select_on="f1")
+    )
+    _m, loss_history, _n, loss_best = train(
+        _point_cfg(tiny_point_data, out, run_name="on_loss", select_on="val_loss")
+    )
+    assert f1_best == int(np.argmax(f1_history["val_f1"])) + 1
+    assert loss_best == int(np.argmin(loss_history["val_loss"])) + 1
+
+
+def test_a_tapered_point_decoder_trains_end_to_end(stub_backbone, tiny_point_data, tmp_path):
+    """The run's actual shape — a point task on a tapered ladder — completes.
+
+    Widths are the run's ratio scaled down to what the stub trunk affords;
+    what is being tested is that a sequence ``c_dec`` survives config
+    round-trip, model build, training, validation and checkpointing.
+    """
+    out = tmp_path / "runs"
+    cfg = _point_cfg(tiny_point_data, out, run_name="taper", c_dec=[128, 96, 32])
+    saved = cfg.to_json(tmp_path / "taper.json")
+    assert json.loads(saved.read_text())["c_dec"] == [128, 96, 32]
+
+    model, history, _n, best_epoch = train(TrainConfig.from_json(saved, strict=True))
+    assert model.decoder.level_widths == (128, 96, 32)
+    assert best_epoch >= 1
+    assert all(np.isfinite(history["val_f1"]))
+    payload = _payload(out / "taper" / "best.pt")
+    assert payload["config"]["c_dec"] == [128, 96, 32]
+    assert payload["decoder"]["head.weight"].shape == (1, 32, 1, 1)
+
+
+def test_a_point_run_writes_scoreable_predictions(stub_backbone, tiny_point_data, tmp_path):
+    """The seam that makes offline scoring possible: points land on disk.
+
+    Without this a point run leaves only history.json behind, and point-in-box
+    F1 could not be recovered without standing the GPU box back up.
+    """
+    from cropcounter.metrics import read_point_results
+
+    out = tmp_path / "runs"
+    cfg = _point_cfg(tiny_point_data, out, run_name="pred", ap_tau=0.001)
+    train(cfg)
+
+    for filename in ("predictions.json", "predictions_last.json"):
+        payload = json.loads((out / "pred" / filename).read_text())
+        assert payload["detect_tau"] == 0.001
+        assert payload["output_stride"] == cfg.output_stride
+        # One entry per val image, including the empty frame.
+        assert set(payload["points"]) == {"val_0.png", "val_1.png"}
+
+    points = read_point_results(out / "pred" / "predictions.json")
+    for name, array in points.items():
+        assert array.ndim == 2 and array.shape[1] == 3, name
+        if len(array):
+            assert (array[:, 2] >= 0.001).all(), f"{name} below the decode floor"
+            assert (array[:, 0] <= SIDE).all() and (array[:, 1] <= SIDE).all()
+
+
+def test_point_predictions_score_through_the_point_in_box_scorer(
+    stub_backbone, tiny_point_data, tiny_box_data, tmp_path
+):
+    """End to end: a point run's file joins to BOX ground truth by file name.
+
+    The join is the whole reason the predictions are keyed by name — the points
+    root renumbers image ids and the bbox root keeps CFD's original strings, so
+    an id-keyed file would not join at all.
+    """
+    import sys
+
+    sys.path.insert(
+        0, str(Path(__file__).resolve().parents[1] / "examples" / "FishDetection" / "scripts")
+    )
+    import point_in_box as pib
+
+    from cropcounter.metrics import read_point_results
+
+    out = tmp_path / "runs"
+    train(_point_cfg(tiny_point_data, out, run_name="score", ap_tau=0.001))
+    preds = read_point_results(out / "score" / "predictions.json")
+
+    # GT boxes from the BOX root, rekeyed from COCO id to file name.
+    document = json.loads((tiny_box_data / "val" / "annotations.json").read_text())
+    names = {img["id"]: img["file_name"] for img in document["images"]}
+    gt = {
+        names[image_id]: boxes
+        for image_id, boxes in pib.coco_boxes_by_image(
+            tiny_box_data / "val" / "annotations.json"
+        ).items()
+    }
+    assert set(gt) == set(preds), "the name join must be total in both directions"
+
+    summary, rows = pib.score_dataset(preds, gt, conf_thr=0.5)
+    assert len(rows) == len(gt)
+    assert 0.0 <= summary["precision"] <= 1.0
+    assert 0.0 <= summary["recall"] <= 1.0
+    assert 0.0 <= summary["f1"] <= 1.0
+    assert summary["count_mae"] >= 0.0
