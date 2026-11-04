@@ -16,7 +16,7 @@ import time
 import warnings
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -99,7 +99,11 @@ class TrainConfig:
 
     # Model
     backbone: str = "base"
-    c_dec: int = 192
+    # One int for a uniform decoder, or three widths (stride 16, 8, 4) for a
+    # tapered one — see PyramidDecoder for why the ladder's steps differ so
+    # much in cost. JSON round-trips a list unchanged, so a saved config or a
+    # checkpoint payload can carry either form.
+    c_dec: Union[int, Sequence[int]] = 192
     output_stride: int = 4
 
     # Targets & decoding (k / nms_radius / tau: one value, or {class: value})

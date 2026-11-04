@@ -10,6 +10,10 @@ Localization is a diagnostic requirement, not just a product one: what
 matters is producing as many predictions as there are plants, near their
 true locations.
 
+See how it performs across domains (maize tassels, wheat heads, wheat emergence) → [examples](examples/).
+
+[![Crop Counter outputs: detected points and model heatmaps for maize tassels, wheat heads and wheat emergence](docs/images/model-outputs.png)](examples/)
+
 This repo ships with a **wheat emergence counter** as the worked example
 (labels `Wheat` / `Volunteer`, example dataset, config, baseline numbers).
 The package itself is crop-agnostic — point in a different `fmt="cvat"` /
@@ -176,8 +180,8 @@ device = torch.device("cpu")  # or "mps" / "cuda"
 model, cfg = load_checkpoint("weights/decoder_best.pt", device, weights_dir="weights")
 model.eval()
 
-records = records_from_folder("examples/data/val/images")
-val_ds = CropTileDataset(records, "examples/data/val/images", train=False,
+records = records_from_folder("examples/demo/data/val/images")
+val_ds = CropTileDataset(records, "examples/demo/data/val/images", train=False,
                           output_stride=cfg.output_stride)
 
 for record, item in zip(records, val_ds):
@@ -201,7 +205,7 @@ these shipped weights (8.59 vs 13.83 val MAE — see
 
 ## Quickstart: train your own + run inference
 
-`examples/data` ships a small, anonymised 20-image wheat dataset
+`examples/demo/data` ships a small, anonymised 20-image wheat dataset
 (14 train / 6 val — see [`examples/README.md`](examples/README.md)) laid out
 the way `load_splits` expects, plus
 [`examples/config_13ep.json`](examples/config_13ep.json), a short 13-epoch
@@ -209,7 +213,7 @@ config for a quick end-to-end run.
 
 ```bash
 python -m cropcounter.train --config examples/config_13ep.json \
-    --data-root examples/data --weights-dir weights --out-dir runs
+    --data-root examples/demo/data --weights-dir weights --out-dir runs
 ```
 
 `--device cpu|mps|cuda`, `--epochs`, and `--run-name` are also available as
@@ -366,7 +370,7 @@ comparable per-epoch signal; calibrate it once at the end with
 quote swept numbers only against other swept numbers.
 
 These numbers are from the same wheat dataset and farmer-grouped train/val
-split this repo's example is a small slice of (`examples/data` is 20 of the
+split this repo's example is a small slice of (`examples/demo/data` is 20 of the
 full ~1,150 images, for a quick smoke run — not for reproducing these
 numbers). Counting quality (MAE) and localization quality (F1) are reported
 together because a good count with a poor F1 means compensating
