@@ -12,6 +12,8 @@ true locations.
 
 See how it performs across domains (maize tassels, wheat heads, wheat emergence) → [examples](examples/).
 
+[![Crop Counter outputs: detected points and model heatmaps for maize tassels, wheat heads and wheat emergence](docs/images/model-outputs.png)](examples/)
+
 This repo ships with a **wheat emergence counter** as the worked example
 (labels `Wheat` / `Volunteer`, example dataset, config, baseline numbers).
 The package itself is crop-agnostic — point in a different `fmt="cvat"` /
