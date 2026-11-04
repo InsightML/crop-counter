@@ -10,6 +10,8 @@ Localization is a diagnostic requirement, not just a product one: what
 matters is producing as many predictions as there are plants, near their
 true locations.
 
+See how it performs across domains (maize tassels, wheat heads, wheat emergence) → [examples](examples/).
+
 This repo ships with a **wheat emergence counter** as the worked example
 (labels `Wheat` / `Volunteer`, example dataset, config, baseline numbers).
 The package itself is crop-agnostic — point in a different `fmt="cvat"` /
