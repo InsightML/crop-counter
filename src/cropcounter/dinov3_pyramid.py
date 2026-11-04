@@ -1,8 +1,10 @@
 """Frozen DINOv3 ConvNeXt backbone + pyramid decoder for peak-heatmap counting.
 
 The backbone stays frozen and permanently in eval mode; only the decoder
-trains. The model outputs single-channel logits at ``output_stride`` (4 by
-default) — apply sigmoid + ``heatmap.decode_peaks`` to get points.
+trains. The model outputs one logit channel per class at ``output_stride``
+(4 by default; ``n_classes=1`` is the single-class default) — apply sigmoid +
+``inference.decode_classes`` (or ``heatmap.decode_peaks`` on one channel)
+to get points.
 """
 
 from __future__ import annotations
@@ -87,15 +89,16 @@ class _ConvBlock(nn.Sequential):
 
 
 class PyramidDecoder(nn.Module):
-    """U-Net-style fusion decoder over an FPN-style lateral pyramid -> 1-channel logits.
+    """U-Net-style fusion decoder over an FPN-style lateral pyramid -> per-class logits.
 
     A hybrid: 1x1 lateral projections bring every backbone stage to the
     decoder's width (the FPN trait), then a bilinear x2 top-down ladder from
     stride 32 to stride 4 *concatenates* each same-stride lateral and applies a
     double conv block (the U-Net trait). A single head emits fine-scale logits
-    rather than per-level predictions. With ``output_stride=2`` one extra
-    skip-less upsample+conv block is added (ConvNeXt has no stride-2 features
-    to fuse).
+    rather than per-level predictions — one channel per class, so a
+    single-class model has a 1-channel head. With ``output_stride=2`` one
+    extra skip-less upsample+conv block is added (ConvNeXt has no stride-2
+    features to fuse).
 
     **Width can vary per ladder step.** ``c_dec`` takes either one int (every
     step that width — the original behaviour) or three ints ordered coarse to
@@ -133,11 +136,15 @@ class PyramidDecoder(nn.Module):
         stage_channels: Sequence[int],
         c_dec: Union[int, Sequence[int]] = 192,
         output_stride: int = 4,
+        n_classes: int = 1,
     ) -> None:
         super().__init__()
         if output_stride not in (2, 4):
             raise ValueError(f"output_stride must be 2 or 4, got {output_stride}")
+        if n_classes < 1:
+            raise ValueError(f"n_classes must be >= 1, got {n_classes}")
         self.output_stride = output_stride
+        self.n_classes = n_classes
 
         #: Decoder width at each ladder step, coarse to fine: stride 16, 8, 4.
         self.level_widths = self._resolve_widths(c_dec)
@@ -163,9 +170,9 @@ class PyramidDecoder(nn.Module):
         self.refine = (
             _ConvBlock(w4, w4, groups=self.NORM_GROUPS) if output_stride == 2 else None
         )
-        self.head = nn.Conv2d(w4, 1, kernel_size=1)
-        # Focal-style prior: start predicting p ~ 0.02 everywhere so the
-        # dominant negatives don't swamp early training.
+        self.head = nn.Conv2d(w4, n_classes, kernel_size=1)
+        # Focal-style prior: start predicting p ~ 0.02 everywhere (on every
+        # class channel) so the dominant negatives don't swamp early training.
         nn.init.constant_(self.head.bias, -4.0)
 
     @classmethod
@@ -209,7 +216,8 @@ class CropCounter(nn.Module):
     """Frozen DINOv3 ConvNeXt backbone + trainable pyramid decoder.
 
     forward(x): (B, 3, H, W) normalised RGB, H and W divisible by 32 ->
-    (B, 1, H/s, W/s) logits, s = ``output_stride``.
+    (B, C, H/s, W/s) logits, C = ``n_classes`` (1 by default),
+    s = ``output_stride``.
     """
 
     def __init__(
@@ -218,13 +226,16 @@ class CropCounter(nn.Module):
         weights_dir: Optional[Path] = None,
         c_dec: Union[int, Sequence[int]] = 192,
         output_stride: int = 4,
+        n_classes: int = 1,
     ) -> None:
         super().__init__()
         self.backbone = DinoV3Backbone(backbone_size, weights_dir)
         self.decoder = PyramidDecoder(
-            self.backbone.stage_channels, c_dec=c_dec, output_stride=output_stride
+            self.backbone.stage_channels, c_dec=c_dec, output_stride=output_stride,
+            n_classes=n_classes,
         )
         self.output_stride = output_stride
+        self.n_classes = n_classes
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.decoder(self.backbone(x))

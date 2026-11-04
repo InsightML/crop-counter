@@ -7,10 +7,16 @@ greedy point-NMS that removes plateau ties and duplicate peaks.
 
 All coordinates here are (x, y). "Grid coordinates" means the output-stride
 grid of the model head; ``decode_peaks`` converts back to input pixels.
+
+Everything here is single-channel: one class, one heatmap. Multiclass models
+stack one such heatmap per class along the channel axis —
+``render_class_targets`` renders that stack, ``per_class_values`` resolves a
+scalar-or-dict decode parameter to one value per class, and
+``cropcounter.inference.decode_classes`` runs ``decode_peaks`` per channel.
 """
 from __future__ import annotations
 
-from typing import Tuple, Union
+from typing import Any, Mapping, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -60,6 +66,71 @@ def render_targets(
             out=window,
         )
     return heat
+
+
+def render_class_targets(
+    points: np.ndarray,
+    class_ids: np.ndarray,
+    n_classes: int,
+    out_hw: Tuple[int, int],
+    sigma: float,
+) -> np.ndarray:
+    """Render one peak-normalised Gaussian heatmap per class.
+
+    Args:
+        points: (N, 2) array of (x, y) locations in output-grid coordinates.
+        class_ids: (N,) integer channel index of each point, in
+            ``[0, n_classes)``.
+        n_classes: number of output channels C.
+        out_hw: (height, width) of the output grid.
+        sigma: Gaussian spread in output-grid cells.
+
+    Returns:
+        (C, H, W) float32. Channel ``c`` is :func:`render_targets` over the
+        points whose class id is ``c`` (all zero when a class has no points
+        in this tile). With ``n_classes=1`` this is ``render_targets(...)``
+        with a leading channel axis, so the single-class target is unchanged.
+    """
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+    class_ids = np.asarray(class_ids, dtype=np.int64).reshape(-1)
+    if len(class_ids) != len(points):
+        raise ValueError(
+            f"class_ids has {len(class_ids)} entries for {len(points)} points"
+        )
+    if n_classes < 1:
+        raise ValueError(f"n_classes must be >= 1, got {n_classes}")
+    if len(class_ids) and (class_ids.min() < 0 or class_ids.max() >= n_classes):
+        raise ValueError(
+            f"class ids must lie in [0, {n_classes}), got "
+            f"[{class_ids.min()}, {class_ids.max()}]"
+        )
+    return np.stack(
+        [render_targets(points[class_ids == c], out_hw, sigma) for c in range(n_classes)],
+        axis=0,
+    )
+
+
+def per_class_values(value: Any, class_names: Sequence[str]) -> Tuple[Any, ...]:
+    """Resolve a scalar-or-dict decode parameter to one value per class.
+
+    ``tau`` / ``k`` / ``nms_radius`` may be a single number, broadcast to every
+    class, or a ``{class_name: number}`` mapping whose keys must be exactly
+    ``class_names``.
+
+    Returns:
+        A tuple in ``class_names`` order.
+    """
+    class_names = tuple(class_names)
+    if isinstance(value, Mapping):
+        missing = [name for name in class_names if name not in value]
+        extra = [key for key in value if key not in class_names]
+        if missing or extra:
+            raise ValueError(
+                f"per-class value keys {sorted(value)} do not match classes "
+                f"{list(class_names)} (missing {missing}, unexpected {extra})"
+            )
+        return tuple(value[name] for name in class_names)
+    return tuple(value for _ in class_names)
 
 
 def point_nms(points: np.ndarray, scores: np.ndarray, radius: float) -> np.ndarray:

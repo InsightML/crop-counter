@@ -18,14 +18,18 @@ def penalty_reduced_focal_loss(
     ``(1 - target)^beta`` so cells near a peak are barely penalised.
 
     Args:
-        logits: (B, 1, H, W) raw model outputs (pre-sigmoid).
-        targets: (B, 1, H, W) max-composed Gaussian targets in [0, 1].
+        logits: (B, C, H, W) raw model outputs (pre-sigmoid), one channel per
+            class (C = 1 for a single-class model).
+        targets: (B, C, H, W) max-composed Gaussian targets in [0, 1], one
+            channel per class.
         alpha: focal exponent on the probability term.
         beta: penalty-reduction exponent on the negative weighting.
 
     Returns:
-        Scalar loss, summed over the batch and normalised by the number of
-        peaks (clamped to at least 1 so empty tiles remain well-defined).
+        Scalar loss, summed over the batch and every class channel and
+        normalised by the total number of peaks across all channels (the
+        CenterNet convention; clamped to at least 1 so empty tiles remain
+        well-defined).
     """
     prob = torch.sigmoid(logits)
     log_p = F.logsigmoid(logits)
