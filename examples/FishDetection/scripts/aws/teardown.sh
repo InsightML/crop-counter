@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Stop paying for the benchmark box. Terminates the instance in .aws-instance-id.
 #
-# The BUCKET IS ALWAYS KEPT — it holds the run outputs, and its own 90-day
-# lifecycle rule expires them.
+# The BUCKET IS ALWAYS KEPT — it holds the run outputs and DiveInsight data,
+# which are kept for good (setup.sh sets no expiry unless LIFECYCLE_DAYS is set).
 #
 #   ./teardown.sh          terminate the instance (asks first)
 #   ./teardown.sh --yes    no prompt
@@ -92,4 +92,4 @@ if [ "$DELETE_ALL" -eq 1 ]; then
     fi
 fi
 
-echo "bucket s3://$BUCKET kept (90-day lifecycle handles the objects)"
+echo "bucket s3://$BUCKET kept (objects are not expired)"

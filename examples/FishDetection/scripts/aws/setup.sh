@@ -18,7 +18,9 @@ ROLE="${ROLE:-cfd-benchmark-ec2}"
 PROFILE_NAME="${PROFILE_NAME:-cfd-benchmark-ec2}"
 SG_NAME="${SG_NAME:-cfd-benchmark-ssm-only}"
 PROJECT_TAG="${PROJECT_TAG:-cfd-benchmark}"
-LIFECYCLE_DAYS="${LIFECYCLE_DAYS:-90}"
+# Objects are kept for good by default: the bucket also holds DiveInsight footage
+# and run data. Set LIFECYCLE_DAYS=N to opt in to expiring everything after N days.
+LIFECYCLE_DAYS="${LIFECYCLE_DAYS:-}"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="${REPO:-$(cd "$HERE/../../../.." && pwd)}"
@@ -45,11 +47,18 @@ aws_s3api put-public-access-block --bucket "$BUCKET" \
     --public-access-block-configuration \
     'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true'
 aws_s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration 'Status=Suspended'
+if [ -n "$LIFECYCLE_DAYS" ]; then
+    RULE="{\"ID\":\"expire-${LIFECYCLE_DAYS}d\",\"Status\":\"Enabled\",\"Filter\":{\"Prefix\":\"\"},\"Expiration\":{\"Days\":${LIFECYCLE_DAYS}},\"AbortIncompleteMultipartUpload\":{\"DaysAfterInitiation\":7}}"
+    KEEP="objects expire after ${LIFECYCLE_DAYS}d"
+else
+    RULE="{\"ID\":\"abort-incomplete-mpu-7d\",\"Status\":\"Enabled\",\"Filter\":{\"Prefix\":\"\"},\"AbortIncompleteMultipartUpload\":{\"DaysAfterInitiation\":7}}"
+    KEEP="objects kept (no expiry)"
+fi
 aws_s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" \
-    --lifecycle-configuration "{\"Rules\":[{\"ID\":\"expire-${LIFECYCLE_DAYS}d\",\"Status\":\"Enabled\",\"Filter\":{\"Prefix\":\"\"},\"Expiration\":{\"Days\":${LIFECYCLE_DAYS}},\"AbortIncompleteMultipartUpload\":{\"DaysAfterInitiation\":7}}]}"
+    --lifecycle-configuration "{\"Rules\":[${RULE}]}"
 aws_s3api put-bucket-tagging --bucket "$BUCKET" \
     --tagging "TagSet=[{Key=project,Value=$PROJECT_TAG}]"
-echo "   public access blocked | versioning off | objects expire after ${LIFECYCLE_DAYS}d"
+echo "   public access blocked | versioning off | $KEEP"
 
 echo "== IAM role $ROLE =="
 TRUST='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
